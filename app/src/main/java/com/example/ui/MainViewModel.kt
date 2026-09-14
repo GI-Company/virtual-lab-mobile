@@ -10,6 +10,11 @@ import com.example.session.MagnetometerValues
 import com.example.session.MeasurementPacket
 import com.example.session.SensorMetadata
 import com.example.transport.ConnectionState
+import com.example.transport.DiscoveredVirtualLab
+import com.example.transport.DiscoveryState
+import com.example.transport.NetworkDiagnostics
+import com.example.transport.NetworkDiagnosticsManager
+import com.example.transport.VirtualLabDiscoveryManager
 import com.example.transport.WebSocketClient
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -17,7 +22,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
-import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.text.SimpleDateFormat
@@ -29,9 +33,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val webSocketClient = WebSocketClient()
     private val magnetometerSource = MagnetometerSource(application)
     private val sensorDiscovery = SensorDiscovery(application)
+    val discoveryManager = VirtualLabDiscoveryManager(application)
+    val networkDiagnosticsManager = NetworkDiagnosticsManager(application)
+
+    val discoveryState: StateFlow<DiscoveryState> = discoveryManager.discoveryState
+    val networkDiagnostics: StateFlow<NetworkDiagnostics> = networkDiagnosticsManager.diagnostics
 
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
+
+    private val _connectedEndpoint = MutableStateFlow<String?>(null)
+    val connectedEndpoint: StateFlow<String?> = _connectedEndpoint.asStateFlow()
 
     private val _magnetometerData = MutableStateFlow<MagnetometerData?>(null)
     val magnetometerData: StateFlow<MagnetometerData?> = _magnetometerData.asStateFlow()
@@ -42,23 +54,48 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isRecording = MutableStateFlow(false)
     val isRecording: StateFlow<Boolean> = _isRecording.asStateFlow()
 
-    private var sessionId = "SES-0042" 
-    private var deviceId = "ANDROID-001" 
+    private var sessionId = "SES-0042"
+    private var deviceId = "ANDROID-001"
     private var recordingJob: Job? = null
+    private var connectionJob: Job? = null
 
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
         timeZone = TimeZone.getTimeZone("UTC")
     }
 
+    init {
+        networkDiagnosticsManager.startMonitoring()
+    }
+
+    fun startDiscovery() {
+        discoveryManager.startDiscovery()
+    }
+
+    fun stopDiscovery() {
+        discoveryManager.stopDiscovery()
+    }
+
+    fun retrySearch() {
+        discoveryManager.restartDiscovery()
+    }
+
     fun connect(url: String) {
-        webSocketClient.connect(url).onEach { state ->
+        connectionJob?.cancel()
+        _connectedEndpoint.value = url
+        connectionJob = webSocketClient.connect(url).onEach { state ->
             _connectionState.value = state
+            if (state is ConnectionState.Disconnected || state is ConnectionState.Error) {
+                // Keep connectedEndpoint so user can retry or see what failed
+            }
         }.launchIn(viewModelScope)
     }
 
     fun disconnect() {
+        connectionJob?.cancel()
+        connectionJob = null
         webSocketClient.disconnect()
         _connectionState.value = ConnectionState.Disconnected
+        _connectedEndpoint.value = null
     }
 
     fun toggleRecording() {
@@ -111,5 +148,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         super.onCleared()
         disconnect()
+        discoveryManager.stopDiscovery()
+        networkDiagnosticsManager.stopMonitoring()
     }
 }

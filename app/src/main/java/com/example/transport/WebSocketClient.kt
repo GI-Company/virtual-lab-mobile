@@ -19,7 +19,18 @@ class WebSocketClient {
     private var webSocket: WebSocket? = null
 
     fun connect(url: String): Flow<ConnectionState> = callbackFlow {
-        val request = Request.Builder().url(url).build()
+        try {
+            webSocket?.close(1000, "Reconnecting")
+        } catch (_: Exception) {}
+        webSocket = null
+
+        val request = try {
+            Request.Builder().url(url).build()
+        } catch (e: Exception) {
+            trySend(ConnectionState.Error(e.message ?: "Invalid WebSocket URL"))
+            close()
+            return@callbackFlow
+        }
         
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -36,20 +47,22 @@ class WebSocketClient {
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 Log.e("WebSocketClient", "Error: ${t.message}", t)
-                trySend(ConnectionState.Error(t.message ?: "Unknown error"))
+                trySend(ConnectionState.Error(t.message ?: "Connection failed"))
             }
         })
         
         trySend(ConnectionState.Connecting)
 
         awaitClose {
-            webSocket?.close(1000, "User closed connection")
+            try {
+                webSocket?.close(1000, "User closed connection")
+            } catch (_: Exception) {}
             webSocket = null
         }
     }
 
-    fun send(message: String) {
-        webSocket?.send(message)
+    fun send(message: String): Boolean {
+        return webSocket?.send(message) ?: false
     }
 
     fun disconnect() {
