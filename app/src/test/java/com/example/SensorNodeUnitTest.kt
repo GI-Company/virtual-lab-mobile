@@ -10,6 +10,8 @@ import org.junit.Test
 
 class SensorNodeUnitTest {
 
+    private val json = Json { encodeDefaults = true }
+
     @Test
     fun measurementPacket_serializesCorrectlyWithBackwardsCompatibility() {
         val packet = MeasurementPacket(
@@ -45,7 +47,7 @@ class SensorNodeUnitTest {
             accuracy = 3
         )
 
-        val jsonString = Json.encodeToString(packet)
+        val jsonString = json.encodeToString(packet)
 
         assertTrue(jsonString.contains("\"schema_version\":\"1\""))
         assertTrue(jsonString.contains("\"device_id\":\"ANDROID-8f27a93e\""))
@@ -90,7 +92,7 @@ class SensorNodeUnitTest {
             accuracy = 3
         )
 
-        val jsonString = Json.encodeToString(accelPacket)
+        val jsonString = json.encodeToString(accelPacket)
         assertTrue(jsonString.contains("\"measurement_type\":\"ACCELERATION\""))
         assertTrue(jsonString.contains("\"sensor_id\":\"accelerometer\""))
         assertTrue(jsonString.contains("\"ax\":0.12"))
@@ -101,5 +103,69 @@ class SensorNodeUnitTest {
         val sdk = android.os.Build.VERSION.SDK_INT
         val expected = if (sdk >= 37) "GRANTED" else "NOT APPLICABLE (API $sdk)"
         assertTrue(expected.contains("API") || expected == "GRANTED")
+    }
+
+    @Test
+    fun cameraFrameMetadata_serializesCorrectly() {
+        val meta = com.example.camera.CameraFrameMetadata(
+            deviceId = "ANDROID-8f27a93e",
+            cameraId = "0",
+            frameSequence = 42L,
+            deviceTimestampNs = 9876543210L,
+            width = 1920,
+            height = 1080,
+            lensFacing = "BACK",
+            focalLengthMm = 5.4f,
+            exposureTimeNs = 20_000_000L,
+            sensorSensitivityIso = 100,
+            focusDistance = 0.5f,
+            frameSizeBytes = 12345
+        )
+        val jsonString = json.encodeToString(meta)
+        assertTrue(jsonString.contains("\"camera_id\":\"0\""))
+        assertTrue(jsonString.contains("\"exposure_time_ns\":20000000"))
+        assertTrue(jsonString.contains("\"sensor_sensitivity_iso\":100"))
+        assertTrue(jsonString.contains("\"lens_facing\":\"BACK\""))
+        assertTrue(jsonString.contains("\"frame_size_bytes\":12345"))
+    }
+
+    @Test
+    fun cameraBinaryMessage_lengthPrefixFormat() {
+        val meta = com.example.camera.CameraFrameMetadata(
+            deviceId = "ANDROID-8f27a93e",
+            cameraId = "0",
+            frameSequence = 1L,
+            deviceTimestampNs = 1000L,
+            width = 1920,
+            height = 1080,
+            lensFacing = "BACK",
+            focalLengthMm = 5.4f,
+            exposureTimeNs = 20_000_000L,
+            sensorSensitivityIso = 100,
+            focusDistance = 0.5f,
+            frameSizeBytes = 4
+        )
+        val jsonBytes = json.encodeToString(meta).toByteArray(Charsets.UTF_8)
+        val fakeJpeg = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xD9.toByte())
+
+        val buffer = java.nio.ByteBuffer.allocate(4 + jsonBytes.size + fakeJpeg.size)
+        buffer.order(java.nio.ByteOrder.BIG_ENDIAN)
+        buffer.putInt(jsonBytes.size)
+        buffer.put(jsonBytes)
+        buffer.put(fakeJpeg)
+
+        val packetBytes = buffer.array()
+        val readBuffer = java.nio.ByteBuffer.wrap(packetBytes).order(java.nio.ByteOrder.BIG_ENDIAN)
+        val readJsonLen = readBuffer.getInt()
+        assertEquals(jsonBytes.size, readJsonLen)
+
+        val readJsonBytes = ByteArray(readJsonLen)
+        readBuffer.get(readJsonBytes)
+        assertEquals(String(jsonBytes, Charsets.UTF_8), String(readJsonBytes, Charsets.UTF_8))
+
+        val readJpeg = ByteArray(fakeJpeg.size)
+        readBuffer.get(readJpeg)
+        assertEquals(0xFF.toByte(), readJpeg[0])
+        assertEquals(0xD8.toByte(), readJpeg[1])
     }
 }

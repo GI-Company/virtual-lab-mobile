@@ -29,17 +29,23 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.widget.Toast
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.acquisition.DiscoveredSensorMeta
 import com.example.acquisition.LiveSensorReading
 import com.example.acquisition.SensorTypeClass
+import com.example.camera.CameraMode
+import com.example.camera.CameraPermissionState
 import com.example.identity.DeviceMetadata
 import com.example.transport.ConnectionState
 import com.example.transport.DiscoveredVirtualLab
@@ -53,6 +59,9 @@ import java.util.Locale
 fun SensorNodeApp(
     viewModel: MainViewModel = viewModel()
 ) {
+    val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
+
     val connectionState by viewModel.connectionState.collectAsState()
     val connectedEndpoint by viewModel.connectedEndpoint.collectAsState()
     val discoveryState by viewModel.discoveryState.collectAsState()
@@ -67,9 +76,36 @@ fun SensorNodeApp(
     val streamedPacketsCount by viewModel.streamedPacketsCount.collectAsState()
     val showLocalNetworkRestrictionWarning by viewModel.showLocalNetworkRestrictionWarning.collectAsState()
 
+    // Camera Subsystem State
+    val cameraPermissionState by viewModel.cameraPermissionState.collectAsState()
+    val discoveredCameras by viewModel.discoveredCameras.collectAsState()
+    val concurrentCameraGroups by viewModel.concurrentCameraGroups.collectAsState()
+    val selectedCamera by viewModel.selectedCamera.collectAsState()
+    val cameraMode by viewModel.cameraMode.collectAsState()
+    val selectedConcurrentGroup by viewModel.selectedConcurrentGroup.collectAsState()
+    val isCameraStreaming by viewModel.isCameraStreaming.collectAsState()
+    val liveCameraStats by viewModel.liveCameraStats.collectAsState()
+    val previewBitmap by viewModel.previewBitmap.collectAsState()
+    val lastCapturedFrame by viewModel.lastCapturedFrame.collectAsState()
+    val cameraErrorMessage by viewModel.cameraErrorMessage.collectAsState()
+    val cameraWsState by viewModel.cameraWsState.collectAsState()
+
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        viewModel.onCameraPermissionResult(isGranted)
+    }
+
+    val requestCameraPermissionAction = {
+        cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
+    }
+
     val permissionsLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
+        results[android.Manifest.permission.CAMERA]?.let {
+            viewModel.onCameraPermissionResult(it)
+        }
         val allGranted = results.values.all { it }
         if (allGranted) {
             viewModel.onPermissionsGranted()
@@ -86,7 +122,10 @@ fun SensorNodeApp(
     }
 
     val requestPermissionsAction = {
-        val perms = viewModel.permissionManager.getPermissionsToRequest()
+        val perms = viewModel.permissionManager.getPermissionsToRequest().toMutableList()
+        if (!viewModel.cameraPermissionManager.isCameraPermissionGranted()) {
+            perms.add(android.Manifest.permission.CAMERA)
+        }
         if (perms.isNotEmpty()) {
             permissionsLauncher.launch(perms.toTypedArray())
         } else {
@@ -176,6 +215,47 @@ fun SensorNodeApp(
                 DeviceCard(metadata = viewModel.deviceMetadata)
             }
 
+            // CAMERA PERMISSION BANNER (if needed)
+            if (cameraPermissionState != CameraPermissionState.GRANTED) {
+                item {
+                    CameraPermissionBanner(onRequestAccess = requestCameraPermissionAction)
+                }
+            }
+
+            // CAMERAS INVENTORY
+            item {
+                CamerasInventoryCard(
+                    discoveredCameras = discoveredCameras,
+                    permissionState = cameraPermissionState,
+                    onRequestPermission = requestCameraPermissionAction,
+                    onRefresh = viewModel::refreshCameraInventory
+                )
+            }
+
+            // LIVE CAMERA STREAM
+            item {
+                LiveCameraCard(
+                    discoveredCameras = discoveredCameras,
+                    selectedCamera = selectedCamera,
+                    onSelectCamera = viewModel::selectCamera,
+                    cameraMode = cameraMode,
+                    onSelectCameraMode = viewModel::setCameraMode,
+                    concurrentGroups = concurrentCameraGroups,
+                    selectedConcurrentGroup = selectedConcurrentGroup,
+                    onSelectConcurrentGroup = viewModel::selectConcurrentGroup,
+                    isStreaming = isCameraStreaming,
+                    onStartStream = viewModel::startCameraStream,
+                    onStopStream = viewModel::stopCameraStream,
+                    onCaptureFrame = viewModel::captureScientificFrame,
+                    liveStats = liveCameraStats,
+                    previewBitmap = previewBitmap,
+                    lastCapturedFrame = lastCapturedFrame,
+                    errorMessage = cameraErrorMessage,
+                    onDismissError = viewModel::dismissCameraError,
+                    isWsConnected = cameraWsState is ConnectionState.Connected
+                )
+            }
+
             // SENSORS
             item {
                 SensorsCard(discoveredSensors = viewModel.discoveredSensors)
@@ -211,6 +291,11 @@ fun SensorNodeApp(
                 AdvancedCard(
                     diagnostics = networkDiagnostics,
                     connectionLogs = connectionLogs,
+                    cameraDiagnosticsReport = viewModel.generateCameraDiagnosticsReport(),
+                    onCopyCameraDiagnostics = {
+                        clipboardManager.setText(AnnotatedString(viewModel.generateCameraDiagnosticsReport()))
+                        Toast.makeText(context, "Camera diagnostics copied to clipboard", Toast.LENGTH_SHORT).show()
+                    },
                     onConnectManual = { url ->
                         viewModel.connect(url)
                     },
@@ -1162,6 +1247,8 @@ fun SessionCard(
 fun AdvancedCard(
     diagnostics: NetworkDiagnostics,
     connectionLogs: List<String>,
+    cameraDiagnosticsReport: String,
+    onCopyCameraDiagnostics: () -> Unit,
     onConnectManual: (String) -> Unit,
     isConnecting: Boolean
 ) {
@@ -1284,6 +1371,14 @@ fun AdvancedCard(
                             }
                         }
                     }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                    // CAMERA2 HARDWARE INVENTORY & CONCURRENCY
+                    CameraDiagnosticsView(
+                        diagnosticsReport = cameraDiagnosticsReport,
+                        onCopyDiagnostics = onCopyCameraDiagnostics
+                    )
                 }
             }
         }
