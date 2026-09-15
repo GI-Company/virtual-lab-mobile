@@ -31,13 +31,17 @@ data class DiscoveredVirtualLab(
 
 sealed class DiscoveryState {
     object Idle : DiscoveryState()
+    object PermissionRequired : DiscoveryState()
     object Searching : DiscoveryState()
     data class Found(val devices: List<DiscoveredVirtualLab>) : DiscoveryState()
     object Empty : DiscoveryState()
     data class Error(val message: String) : DiscoveryState()
 }
 
-class VirtualLabDiscoveryManager(private val context: Context) {
+class VirtualLabDiscoveryManager(
+    private val context: Context,
+    private val permissionManager: LocalNetworkPermissionManager
+) {
     companion object {
         private const val TAG = "VirtualLabDiscovery"
         const val SERVICE_TYPE = "_virtuallab._tcp"
@@ -64,6 +68,12 @@ class VirtualLabDiscoveryManager(private val context: Context) {
     val discoveryState: StateFlow<DiscoveryState> = _discoveryState.asStateFlow()
 
     fun startDiscovery() {
+        if (!permissionManager.hasRequiredPermissions()) {
+            Log.w(TAG, "Cannot start NSD discovery: Nearby Devices / Local Network permission not granted")
+            _discoveryState.value = DiscoveryState.PermissionRequired
+            return
+        }
+
         if (isDiscovering) {
             Log.d(TAG, "Discovery already active")
             return
@@ -209,8 +219,13 @@ class VirtualLabDiscoveryManager(private val context: Context) {
     }
 
     private fun handleResolvedService(resolved: NsdServiceInfo) {
-        val host = resolved.host?.hostAddress ?: return
+        val rawHost = resolved.host?.hostAddress ?: return
         val port = resolved.port
+        if (port <= 0 || port > 65535) {
+            Log.w(TAG, "Ignoring resolved service '${resolved.serviceName}': invalid port $port")
+            return
+        }
+
         val serviceName = resolved.serviceName ?: "VirtualLab Desktop"
 
         // Parse attributes/TXT records
@@ -220,15 +235,36 @@ class VirtualLabDiscoveryManager(private val context: Context) {
             stringAttributes[key] = String(bytes, StandardCharsets.UTF_8)
         }
 
-        val pathAttr = stringAttributes["path"] ?: "/sensors"
-        val path = if (pathAttr.startsWith("/")) pathAttr else "/$pathAttr"
-        val protocol = stringAttributes["protocol"] ?: "1"
+        // Case-insensitive lookup for TXT metadata (path, protocol)
+        val pathAttr = stringAttributes.entries
+            .firstOrNull { it.key.equals("path", ignoreCase = true) }
+            ?.value
+            ?.trim()
 
-        val wsUrl = "ws://$host:$port$path"
+        val rawPath = if (!pathAttr.isNullOrEmpty()) pathAttr else "/sensors"
+        val path = if (rawPath.startsWith("/")) rawPath else "/$rawPath"
+
+        val protocolAttr = stringAttributes.entries
+            .firstOrNull { it.key.equals("protocol", ignoreCase = true) }
+            ?.value
+            ?.trim()
+        val protocol = if (!protocolAttr.isNullOrEmpty()) protocolAttr else "1"
+
+        // Format host for URL (bracket IPv6 if necessary)
+        val hostFormatted = if (rawHost.contains(":") && !rawHost.startsWith("[")) {
+            "[$rawHost]"
+        } else {
+            rawHost
+        }
+
+        // The NSD-discovered service port must be authoritative without assuming or hard-coding any port
+        val wsUrl = "ws://$hostFormatted:$port$path"
+
+        Log.i(TAG, "Authoritative VirtualLab resolved: name='$serviceName', host='$hostFormatted', port=$port, path='$path', wsUrl='$wsUrl'")
 
         val device = DiscoveredVirtualLab(
             serviceName = serviceName,
-            hostAddress = host,
+            hostAddress = rawHost,
             port = port,
             path = path,
             protocol = protocol,
@@ -245,8 +281,6 @@ class VirtualLabDiscoveryManager(private val context: Context) {
         if (list.isNotEmpty()) {
             _discoveryState.value = DiscoveryState.Found(list)
         } else if (isDiscovering) {
-            // Still discovering but no devices at the moment
-            // Don't override if already Empty or Searching
             if (_discoveryState.value !is DiscoveryState.Searching && _discoveryState.value !is DiscoveryState.Empty) {
                 _discoveryState.value = DiscoveryState.Empty
             }

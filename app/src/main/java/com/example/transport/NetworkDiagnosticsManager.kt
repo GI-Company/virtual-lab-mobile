@@ -6,6 +6,7 @@ import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.os.Build
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -13,12 +14,25 @@ import java.net.Inet4Address
 import java.net.NetworkInterface
 
 data class NetworkDiagnostics(
+    val androidVersion: String = Build.VERSION.RELEASE ?: "Unknown",
+    val sdkLevel: Int = Build.VERSION.SDK_INT,
+    val targetSdk: Int = 36,
     val isWifiConnected: Boolean = false,
     val localIp: String? = null,
-    val gateway: String? = null
+    val gateway: String? = null,
+    val nearbyDevicesPermission: PermissionStatus = PermissionStatus.DENIED,
+    val localNetworkPermission: PermissionStatus = PermissionStatus.NOT_SUPPORTED,
+    val discoveredHost: String? = null,
+    val discoveredPort: Int? = null,
+    val txtProtocol: String? = null,
+    val txtPath: String? = null,
+    val exactWsUrl: String? = null
 )
 
-class NetworkDiagnosticsManager(private val context: Context) {
+class NetworkDiagnosticsManager(
+    private val context: Context,
+    private val permissionManager: LocalNetworkPermissionManager
+) {
     private val connectivityManager =
         context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
 
@@ -26,6 +40,7 @@ class NetworkDiagnosticsManager(private val context: Context) {
     val diagnostics: StateFlow<NetworkDiagnostics> = _diagnostics.asStateFlow()
 
     private var isMonitoring = false
+    private var lastDiscovered: DiscoveredVirtualLab? = null
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
@@ -53,8 +68,8 @@ class NetworkDiagnosticsManager(private val context: Context) {
                 .build()
             connectivityManager.registerNetworkCallback(request, networkCallback)
             isMonitoring = true
-        } catch (e: Exception) {
-            // Register network callback fallback
+        } catch (_: Exception) {
+            // Fallback if registering specific request fails
         }
         update()
     }
@@ -63,11 +78,16 @@ class NetworkDiagnosticsManager(private val context: Context) {
         if (!isMonitoring) return
         try {
             connectivityManager.unregisterNetworkCallback(networkCallback)
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             // Ignored
         } finally {
             isMonitoring = false
         }
+    }
+
+    fun updateDiscoveredService(discovered: DiscoveredVirtualLab?) {
+        lastDiscovered = discovered
+        update()
     }
 
     fun update() {
@@ -96,7 +116,6 @@ class NetworkDiagnosticsManager(private val context: Context) {
                 .firstOrNull()?.hostAddress
         }
 
-        // Fallback for IP if linkProperties didn't provide it
         if (localIp == null && isWifi) {
             try {
                 val interfaces = NetworkInterface.getNetworkInterfaces()
@@ -117,10 +136,25 @@ class NetworkDiagnosticsManager(private val context: Context) {
             } catch (_: Exception) {}
         }
 
+        val nearbyPerm = permissionManager.getNearbyWifiDevicesStatus()
+        val localNetPerm = permissionManager.getLocalNetworkPermissionStatus()
+
+        val discovered = lastDiscovered
+
         return NetworkDiagnostics(
+            androidVersion = Build.VERSION.RELEASE ?: "Unknown",
+            sdkLevel = Build.VERSION.SDK_INT,
+            targetSdk = context.applicationInfo.targetSdkVersion,
             isWifiConnected = isWifi,
             localIp = localIp,
-            gateway = gateway
+            gateway = gateway,
+            nearbyDevicesPermission = nearbyPerm,
+            localNetworkPermission = localNetPerm,
+            discoveredHost = discovered?.hostAddress,
+            discoveredPort = discovered?.port,
+            txtProtocol = discovered?.protocol,
+            txtPath = discovered?.path,
+            exactWsUrl = discovered?.wsUrl
         )
     }
 }

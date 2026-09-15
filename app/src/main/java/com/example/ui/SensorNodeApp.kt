@@ -1,19 +1,27 @@
 package com.example.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Router
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Sensors
+import androidx.compose.material.icons.filled.Usb
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.*
@@ -24,14 +32,20 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.acquisition.DiscoveredSensorMeta
+import com.example.acquisition.LiveSensorReading
+import com.example.acquisition.SensorTypeClass
+import com.example.identity.DeviceMetadata
 import com.example.transport.ConnectionState
 import com.example.transport.DiscoveredVirtualLab
 import com.example.transport.DiscoveryState
 import com.example.transport.NetworkDiagnostics
+import com.example.transport.PermissionStatus
 import java.util.Locale
-import kotlin.math.sqrt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -42,14 +56,39 @@ fun SensorNodeApp(
     val connectedEndpoint by viewModel.connectedEndpoint.collectAsState()
     val discoveryState by viewModel.discoveryState.collectAsState()
     val networkDiagnostics by viewModel.networkDiagnostics.collectAsState()
-    val magnetometerData by viewModel.magnetometerData.collectAsState()
-    val isMagnetometerAvailable by viewModel.isMagnetometerAvailable.collectAsState()
+    val connectionLogs by viewModel.connectionLogs.collectAsState()
+
+    val liveReadings by viewModel.liveReadings.collectAsState()
+    val selectedPreviewSensor by viewModel.selectedPreviewSensor.collectAsState()
+    val selectedCaptureSensors by viewModel.selectedCaptureSensors.collectAsState()
+    val sampleId by viewModel.sampleId.collectAsState()
     val isRecording by viewModel.isRecording.collectAsState()
+    val streamedPacketsCount by viewModel.streamedPacketsCount.collectAsState()
+
+    val permissionsLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        val allGranted = results.values.all { it }
+        if (allGranted) {
+            viewModel.onPermissionsGranted()
+        } else {
+            viewModel.checkAndStartDiscovery()
+        }
+    }
 
     DisposableEffect(Unit) {
-        viewModel.startDiscovery()
+        viewModel.checkAndStartDiscovery()
         onDispose {
             viewModel.stopDiscovery()
+        }
+    }
+
+    val requestPermissionsAction = {
+        val perms = viewModel.permissionManager.getPermissionsToRequest()
+        if (perms.isNotEmpty()) {
+            permissionsLauncher.launch(perms.toTypedArray())
+        } else {
+            viewModel.onPermissionsGranted()
         }
     }
 
@@ -63,10 +102,17 @@ fun SensorNodeApp(
                             contentDescription = "SensorNode logo",
                             modifier = Modifier.padding(end = 8.dp)
                         )
-                        Text(
-                            "VirtualLab SensorNode",
-                            style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
-                        )
+                        Column {
+                            Text(
+                                "VIRTUAL LAB SENSORNODE",
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                            )
+                            Text(
+                                "Scientific Acquisition Node",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                            )
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -80,66 +126,165 @@ fun SensorNodeApp(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(16.dp),
+                .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            item {
-                NetworkDiagnosticsSection(networkDiagnostics)
+            // Permission Required Banner
+            if (discoveryState is DiscoveryState.PermissionRequired ||
+                networkDiagnostics.nearbyDevicesPermission == PermissionStatus.DENIED
+            ) {
+                item {
+                    PermissionRequiredBanner(onRequestAccess = requestPermissionsAction)
+                }
             }
+
+            // NETWORK
             item {
-                ConnectSection(
+                NetworkCard(
+                    diagnostics = networkDiagnostics,
+                    onRequestAccess = requestPermissionsAction
+                )
+            }
+
+            // VIRTUAL LAB
+            item {
+                VirtualLabCard(
                     discoveryState = discoveryState,
                     connectionState = connectionState,
                     connectedEndpoint = connectedEndpoint,
-                    onConnect = viewModel::connect,
+                    isUsbDevMode = viewModel.isUsbDevelopmentUrl(connectedEndpoint),
+                    onConnect = { device ->
+                        viewModel.connect(device.wsUrl, device)
+                    },
                     onDisconnect = viewModel::disconnect,
-                    onRetrySearch = viewModel::retrySearch
+                    onRetrySearch = viewModel::retrySearch,
+                    onRequestPermission = requestPermissionsAction
                 )
             }
+
+            // DEVICE
             item {
-                SensorsSection(isMagnetometerAvailable)
+                DeviceCard(metadata = viewModel.deviceMetadata)
             }
+
+            // SENSORS
             item {
-                LiveSection(magnetometerData)
+                SensorsCard(discoveredSensors = viewModel.discoveredSensors)
             }
+
+            // LIVE
             item {
-                SessionSection(
+                LiveCard(
+                    availableSensors = viewModel.discoveredSensors.filter { it.value.isAvailable }.keys.toList(),
+                    selectedSensor = selectedPreviewSensor,
+                    reading = liveReadings[selectedPreviewSensor],
+                    onSelectSensor = viewModel::selectPreviewSensor
+                )
+            }
+
+            // SESSION
+            item {
+                SessionCard(
+                    sampleId = sampleId,
+                    onSampleIdChange = viewModel::setSampleId,
+                    availableSensors = viewModel.discoveredSensors,
+                    selectedSensors = selectedCaptureSensors,
+                    onToggleSensor = viewModel::toggleCaptureSensor,
                     isRecording = isRecording,
+                    streamedCount = streamedPacketsCount,
+                    isConnected = connectionState is ConnectionState.Connected,
                     onToggleRecording = viewModel::toggleRecording
                 )
+            }
+
+            // ADVANCED
+            item {
+                AdvancedCard(
+                    diagnostics = networkDiagnostics,
+                    connectionLogs = connectionLogs,
+                    onConnectManual = { url ->
+                        viewModel.connect(url)
+                    },
+                    isConnecting = connectionState is ConnectionState.Connecting
+                )
+            }
+
+            item {
+                Spacer(Modifier.height(16.dp))
             }
         }
     }
 }
 
+// -------------------------------------------------------------
+// PERMISSION REQUIRED BANNER
+// -------------------------------------------------------------
 @Composable
-fun NetworkDiagnosticsSection(diagnostics: NetworkDiagnostics) {
+fun PermissionRequiredBanner(onRequestAccess: () -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-        )
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Security,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "LOCAL NETWORK ACCESS REQUIRED",
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                    color = MaterialTheme.colorScheme.onErrorContainer
+                )
+            }
+            Text(
+                "SensorNode needs Nearby Devices permission to connect directly to VirtualLab Desktop on your local network.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onErrorContainer
+            )
+            Spacer(Modifier.height(4.dp))
+            Button(
+                onClick = onRequestAccess,
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                modifier = Modifier.testTag("grant_access_button")
+            ) {
+                Text("GRANT ACCESS")
+            }
+        }
+    }
+}
+
+// -------------------------------------------------------------
+// NETWORK CARD
+// -------------------------------------------------------------
+@Composable
+fun NetworkCard(
+    diagnostics: NetworkDiagnostics,
+    onRequestAccess: () -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
             Row(
-                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
-                modifier = Modifier.fillMaxWidth()
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
                     "NETWORK",
-                    style = MaterialTheme.typography.labelLarge.copy(
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
                         imageVector = if (diagnostics.isWifiConnected) Icons.Default.Wifi else Icons.Default.WifiOff,
-                        contentDescription = "Wi-Fi icon",
+                        contentDescription = null,
                         tint = if (diagnostics.isWifiConnected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                         modifier = Modifier.size(18.dp)
                     )
@@ -152,398 +297,358 @@ fun NetworkDiagnosticsSection(diagnostics: NetworkDiagnostics) {
                 }
             }
 
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 
-            DiagnosticRow(label = "Device IP", value = diagnostics.localIp ?: "Unavailable")
-            if (diagnostics.gateway != null) {
-                DiagnosticRow(label = "Gateway", value = diagnostics.gateway)
+            MetricRow(label = "Wi-Fi", value = if (diagnostics.isWifiConnected) "CONNECTED" else "DISCONNECTED")
+            MetricRow(label = "Device IP", value = diagnostics.localIp ?: "UNAVAILABLE")
+            MetricRow(label = "Gateway", value = diagnostics.gateway ?: "UNAVAILABLE")
+
+            val permLabel = when (diagnostics.nearbyDevicesPermission) {
+                PermissionStatus.GRANTED -> "GRANTED"
+                PermissionStatus.DENIED -> "PERMISSION REQUIRED"
+                PermissionStatus.NOT_REQUIRED -> "NOT REQUIRED"
+                PermissionStatus.NOT_SUPPORTED -> "NOT SUPPORTED"
+            }
+            val permColor = when (diagnostics.nearbyDevicesPermission) {
+                PermissionStatus.GRANTED -> MaterialTheme.colorScheme.primary
+                PermissionStatus.DENIED -> MaterialTheme.colorScheme.error
+                else -> MaterialTheme.colorScheme.onSurfaceVariant
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "LAN Permission",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (diagnostics.nearbyDevicesPermission == PermissionStatus.DENIED) {
+                    TextButton(
+                        onClick = onRequestAccess,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                    ) {
+                        Text("REQUEST", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+                    }
+                } else {
+                    Text(
+                        text = permLabel,
+                        style = MaterialTheme.typography.bodyMedium.copy(
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        ),
+                        color = permColor
+                    )
+                }
             }
         }
     }
 }
 
+// -------------------------------------------------------------
+// VIRTUAL LAB CARD
+// -------------------------------------------------------------
 @Composable
-private fun DiagnosticRow(label: String, value: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Text(
-            text = value,
-            style = MaterialTheme.typography.bodyMedium.copy(
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.Medium
-            )
-        )
-    }
-}
-
-@Composable
-fun ConnectSection(
+fun VirtualLabCard(
     discoveryState: DiscoveryState,
     connectionState: ConnectionState,
     connectedEndpoint: String?,
-    onConnect: (String) -> Unit,
+    isUsbDevMode: Boolean,
+    onConnect: (DiscoveredVirtualLab) -> Unit,
     onDisconnect: () -> Unit,
-    onRetrySearch: () -> Unit
+    onRetrySearch: () -> Unit,
+    onRequestPermission: () -> Unit
 ) {
-    var manualUrl by remember { mutableStateOf("ws://192.168.1.42:8765/sensors") }
-    var isAdvancedExpanded by remember { mutableStateOf(false) }
-
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text(
-                "CONNECT",
-                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
-            )
-
-            // If already connected
-            if (connectionState is ConnectionState.Connected) {
-                ConnectedStatusCard(
-                    endpoint = connectedEndpoint ?: "Connected",
-                    onDisconnect = onDisconnect
-                )
-            } else if (connectionState is ConnectionState.Connecting) {
-                ConnectingStatusCard(
-                    endpoint = connectedEndpoint ?: "VirtualLab",
-                    onCancel = onDisconnect
-                )
-            } else {
-                // Not connected: show discovery results or empty/searching state
-                if (connectionState is ConnectionState.Error) {
-                    ConnectionErrorBanner(
-                        message = connectionState.message,
-                        onDismiss = onDisconnect
-                    )
-                }
-
-                DiscoveredServicesView(
-                    discoveryState = discoveryState,
-                    onConnect = onConnect,
-                    onRetrySearch = onRetrySearch
-                )
-            }
-
-            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-
-            // Advanced -> Connect manually section
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { isAdvancedExpanded = !isAdvancedExpanded }
-                    .padding(vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    "Advanced",
-                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium)
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "Connect manually",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Icon(
-                        imageVector = if (isAdvancedExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                        contentDescription = if (isAdvancedExpanded) "Collapse manual connect" else "Expand manual connect"
-                    )
-                }
-            }
-
-            AnimatedVisibility(visible = isAdvancedExpanded) {
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    OutlinedTextField(
-                        value = manualUrl,
-                        onValueChange = { manualUrl = it },
-                        label = { Text("WebSocket URL") },
-                        modifier = Modifier.fillMaxWidth().testTag("manual_url_input"),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                        singleLine = true
-                    )
-                    Button(
-                        onClick = { onConnect(manualUrl) },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("connect_manually_button"),
-                        enabled = connectionState !is ConnectionState.Connecting
-                    ) {
-                        Text("CONNECT MANUALLY")
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ConnectedStatusCard(
-    endpoint: String,
-    onDisconnect: () -> Unit
-) {
-    Surface(
-        color = MaterialTheme.colorScheme.primaryContainer,
-        shape = MaterialTheme.shapes.medium,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Row(
-                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.CheckCircle,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        "CONNECTED",
-                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-                Button(
-                    onClick = onDisconnect,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.error
-                    ),
-                    modifier = Modifier.testTag("disconnect_button")
-                ) {
-                    Text("DISCONNECT")
-                }
-            }
-            Text(
-                text = endpoint,
-                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                color = MaterialTheme.colorScheme.onPrimaryContainer
-            )
-        }
-    }
-}
-
-@Composable
-private fun ConnectingStatusCard(
-    endpoint: String,
-    onCancel: () -> Unit
-) {
-    Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = MaterialTheme.shapes.medium,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Row(
-            modifier = Modifier
-                .padding(16.dp)
-                .fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
-                Spacer(Modifier.width(12.dp))
-                Column {
-                    Text(
-                        "Connecting...",
-                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
-                    )
-                    Text(
-                        endpoint,
-                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
-                    )
-                }
-            }
-            OutlinedButton(onClick = onCancel) {
-                Text("CANCEL")
-            }
-        }
-    }
-}
-
-@Composable
-private fun ConnectionErrorBanner(
-    message: String,
-    onDismiss: () -> Unit
-) {
-    Surface(
-        color = MaterialTheme.colorScheme.errorContainer,
-        shape = MaterialTheme.shapes.small,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Row(
-            modifier = Modifier
-                .padding(12.dp)
-                .fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.weight(1f)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Error,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.error
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = message,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onErrorContainer
-                )
-            }
-            TextButton(onClick = onDismiss) {
-                Text("DISMISS", color = MaterialTheme.colorScheme.error)
-            }
-        }
-    }
-}
-
-@Composable
-private fun DiscoveredServicesView(
-    discoveryState: DiscoveryState,
-    onConnect: (String) -> Unit,
-    onRetrySearch: () -> Unit
-) {
-    when (discoveryState) {
-        is DiscoveryState.Searching, is DiscoveryState.Idle -> {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(20.dp),
-                    strokeWidth = 2.dp
-                )
-                Spacer(Modifier.width(12.dp))
                 Text(
-                    "Searching for VirtualLab...",
-                    style = MaterialTheme.typography.bodyMedium
+                    "VIRTUAL LAB",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
                 )
-            }
-        }
-        is DiscoveryState.Found -> {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        "VIRTUAL LAB",
-                        style = MaterialTheme.typography.labelMedium.copy(
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    )
-                    IconButton(
-                        onClick = onRetrySearch,
-                        modifier = Modifier.size(24.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = "Refresh discovered services",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(18.dp)
-                        )
+
+                val stateLabel = when (connectionState) {
+                    is ConnectionState.Connected -> "CONNECTED"
+                    is ConnectionState.Connecting -> "CONNECTING"
+                    is ConnectionState.Error -> "FAILED"
+                    is ConnectionState.Disconnected -> {
+                        when (discoveryState) {
+                            is DiscoveryState.Searching -> "SEARCHING"
+                            is DiscoveryState.Found -> "FOUND"
+                            is DiscoveryState.PermissionRequired -> "PERMISSION REQUIRED"
+                            is DiscoveryState.Empty -> "DISCONNECTED"
+                            is DiscoveryState.Error -> "FAILED"
+                            is DiscoveryState.Idle -> "DISCONNECTED"
+                        }
+                    }
+                }
+                val stateColor = when (connectionState) {
+                    is ConnectionState.Connected -> MaterialTheme.colorScheme.primary
+                    is ConnectionState.Connecting -> MaterialTheme.colorScheme.secondary
+                    is ConnectionState.Error -> MaterialTheme.colorScheme.error
+                    is ConnectionState.Disconnected -> {
+                        if (discoveryState is DiscoveryState.PermissionRequired || discoveryState is DiscoveryState.Error) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.outline
+                        }
                     }
                 }
 
-                discoveryState.devices.forEach { device ->
-                    DiscoveredDeviceItem(device = device, onConnect = { onConnect(device.wsUrl) })
-                }
-            }
-        }
-        is DiscoveryState.Empty -> {
-            Surface(
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
-                shape = MaterialTheme.shapes.medium,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                Surface(
+                    color = stateColor.copy(alpha = 0.15f),
+                    shape = RoundedCornerShape(4.dp)
                 ) {
                     Text(
-                        "NO VIRTUAL LAB FOUND",
-                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        text = stateLabel,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                        color = stateColor
                     )
-                    Text(
-                        "Ensure VirtualLab Desktop is running and both devices are on the same Wi-Fi network.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Button(
-                        onClick = onRetrySearch,
-                        modifier = Modifier.testTag("retry_search_button")
+                }
+            }
+
+            // USB Dev mode notice if active
+            if (isUsbDevMode && connectionState is ConnectionState.Connected) {
+                Surface(
+                    color = MaterialTheme.colorScheme.tertiaryContainer,
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Refresh,
+                            imageVector = Icons.Default.Usb,
                             contentDescription = null,
-                            modifier = Modifier.size(16.dp)
+                            tint = MaterialTheme.colorScheme.onTertiaryContainer
                         )
                         Spacer(Modifier.width(8.dp))
-                        Text("Retry Search")
+                        Column {
+                            Text(
+                                "USB / LOCAL DEVELOPMENT CONNECTION",
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.onTertiaryContainer
+                            )
+                            Text(
+                                "Connected via ADB reverse tunnel. Localhost loopback link active.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.8f)
+                            )
+                        }
                     }
                 }
             }
-        }
-        is DiscoveryState.Error -> {
-            Surface(
-                color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f),
-                shape = MaterialTheme.shapes.medium,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(
-                        "DISCOVERY ERROR",
-                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                        color = MaterialTheme.colorScheme.error
-                    )
-                    Text(
-                        discoveryState.message,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onErrorContainer,
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                    )
-                    Button(
-                        onClick = onRetrySearch,
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                        modifier = Modifier.testTag("retry_search_button")
+
+            // Connected or connecting state
+            when (connectionState) {
+                is ConnectionState.Connected -> {
+                    Surface(
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        shape = MaterialTheme.shapes.medium,
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("Retry Search")
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Default.CheckCircle,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        "VirtualLab Desktop",
+                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                                    )
+                                }
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    text = connectedEndpoint ?: "",
+                                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            }
+                            Button(
+                                onClick = onDisconnect,
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                                modifier = Modifier.testTag("disconnect_button")
+                            ) {
+                                Text("DISCONNECT")
+                            }
+                        }
+                    }
+                }
+                is ConnectionState.Connecting -> {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = MaterialTheme.shapes.medium,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                                Spacer(Modifier.width(12.dp))
+                                Column {
+                                    Text(
+                                        "CONNECTING...",
+                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                                    )
+                                    Text(
+                                        connectedEndpoint ?: "",
+                                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+                                    )
+                                }
+                            }
+                            OutlinedButton(onClick = onDisconnect) {
+                                Text("CANCEL")
+                            }
+                        }
+                    }
+                }
+                is ConnectionState.Error -> {
+                    Surface(
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        shape = MaterialTheme.shapes.small,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "CONNECTION FAILED",
+                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                                Text(
+                                    text = connectionState.message,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                )
+                            }
+                            TextButton(onClick = onDisconnect) {
+                                Text("DISMISS", color = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
+                }
+                is ConnectionState.Disconnected -> {
+                    // Show discovery results
+                    when (discoveryState) {
+                        is DiscoveryState.Searching, is DiscoveryState.Idle -> {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                                Spacer(Modifier.width(12.dp))
+                                Text(
+                                    "Searching for VirtualLab...",
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                            }
+                        }
+                        is DiscoveryState.PermissionRequired -> {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text(
+                                    "Local network discovery requires Nearby Devices permission.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                                Button(
+                                    onClick = onRequestPermission,
+                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                                    modifier = Modifier.testTag("grant_access_button")
+                                ) {
+                                    Text("GRANT ACCESS")
+                                }
+                            }
+                        }
+                        is DiscoveryState.Found -> {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                discoveryState.devices.forEach { device ->
+                                    DiscoveredDeviceCard(
+                                        device = device,
+                                        onConnect = { onConnect(device) }
+                                    )
+                                }
+                            }
+                        }
+                        is DiscoveryState.Empty -> {
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                shape = MaterialTheme.shapes.small,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        "NO VIRTUAL LAB FOUND",
+                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Text(
+                                        "Ensure VirtualLab Desktop is running on the same local Wi-Fi network.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                                        textAlign = TextAlign.Center
+                                    )
+                                    Button(
+                                        onClick = onRetrySearch,
+                                        modifier = Modifier.testTag("retry_search_button")
+                                    ) {
+                                        Icon(imageVector = Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("Retry Search")
+                                    }
+                                }
+                            }
+                        }
+                        is DiscoveryState.Error -> {
+                            Text(
+                                "Discovery error: ${discoveryState.message}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                            Button(onClick = onRetrySearch, modifier = Modifier.testTag("retry_search_button")) {
+                                Text("Retry Search")
+                            }
+                        }
                     }
                 }
             }
@@ -552,12 +657,12 @@ private fun DiscoveredServicesView(
 }
 
 @Composable
-private fun DiscoveredDeviceItem(
+private fun DiscoveredDeviceCard(
     device: DiscoveredVirtualLab,
     onConnect: () -> Unit
 ) {
     Surface(
-        shape = MaterialTheme.shapes.medium,
+        shape = MaterialTheme.shapes.small,
         tonalElevation = 2.dp,
         modifier = Modifier.fillMaxWidth()
     ) {
@@ -570,11 +675,10 @@ private fun DiscoveredDeviceItem(
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.CheckCircle,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(16.dp)
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(4.dp))
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
@@ -588,13 +692,11 @@ private fun DiscoveredDeviceItem(
                     style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                if (device.path != "/sensors" || device.protocol != "1") {
-                    Text(
-                        text = "path: ${device.path} • proto: ${device.protocol}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.outline
-                    )
-                }
+                Text(
+                    text = "Protocol ${device.protocol} • ${device.path}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline
+                )
             }
             Spacer(Modifier.width(8.dp))
             Button(
@@ -607,8 +709,35 @@ private fun DiscoveredDeviceItem(
     }
 }
 
+// -------------------------------------------------------------
+// DEVICE CARD
+// -------------------------------------------------------------
 @Composable
-fun SensorsSection(isMagnetometerAvailable: Boolean) {
+fun DeviceCard(metadata: DeviceMetadata) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                "DEVICE",
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+            )
+            HorizontalDivider(modifier = Modifier.padding(vertical = 2.dp))
+            MetricRow(label = "SensorNode ID", value = metadata.deviceId)
+            MetricRow(label = "Identity", value = metadata.identityType)
+            MetricRow(label = "Android", value = "${metadata.androidVersion} / API ${metadata.sdkLevel}")
+        }
+    }
+}
+
+// -------------------------------------------------------------
+// SENSORS CARD
+// -------------------------------------------------------------
+@Composable
+fun SensorsCard(discoveredSensors: Map<SensorTypeClass, DiscoveredSensorMeta>) {
+    var expandedSensor by remember { mutableStateOf<SensorTypeClass?>(null) }
+
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -618,41 +747,190 @@ fun SensorsSection(isMagnetometerAvailable: Boolean) {
                 "SENSORS",
                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
             )
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector = if (isMagnetometerAvailable) Icons.Default.CheckCircle else Icons.Default.Error,
-                    contentDescription = null,
-                    tint = if (isMagnetometerAvailable) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
-                )
-                Spacer(Modifier.width(8.dp))
-                Text("Magnetometer", style = MaterialTheme.typography.bodyLarge)
-                if (!isMagnetometerAvailable) {
-                    Spacer(Modifier.width(8.dp))
-                    Text("(NOT AVAILABLE)", color = MaterialTheme.colorScheme.error)
+            HorizontalDivider(modifier = Modifier.padding(vertical = 2.dp))
+
+            for (sensorClass in SensorTypeClass.values()) {
+                val meta = discoveredSensors[sensorClass]
+                val isAvailable = meta?.isAvailable == true
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = isAvailable) {
+                            expandedSensor = if (expandedSensor == sensorClass) null else sensorClass
+                        }
+                        .padding(vertical = 4.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = if (isAvailable) Icons.Default.Check else Icons.Default.Close,
+                                contentDescription = null,
+                                tint = if (isAvailable) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = sensorClass.displayName,
+                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium)
+                            )
+                        }
+                        if (isAvailable) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    meta?.name ?: "",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Icon(
+                                    imageVector = if (expandedSensor == sensorClass) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                    tint = MaterialTheme.colorScheme.outline
+                                )
+                            }
+                        } else {
+                            Text(
+                                "NOT AVAILABLE",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+
+                    // Expandable sensor metadata
+                    AnimatedVisibility(visible = expandedSensor == sensorClass && meta != null) {
+                        meta?.let { m ->
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                shape = MaterialTheme.shapes.small,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 4.dp, bottom = 4.dp)
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    SubMetricRow("Vendor", m.vendor)
+                                    SubMetricRow("Version", m.version.toString())
+                                    SubMetricRow("Resolution", "${m.resolution}")
+                                    SubMetricRow("Max Range", "${m.maximumRange}")
+                                    SubMetricRow("Min Delay", "${m.minDelay} µs")
+                                    SubMetricRow("Power", "${m.power} mA")
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 }
 
+// -------------------------------------------------------------
+// LIVE CARD
+// -------------------------------------------------------------
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LiveSection(data: com.example.acquisition.MagnetometerData?) {
+fun LiveCard(
+    availableSensors: List<SensorTypeClass>,
+    selectedSensor: SensorTypeClass,
+    reading: LiveSensorReading?,
+    onSelectSensor: (SensorTypeClass) -> Unit
+) {
+    var dropdownExpanded by remember { mutableStateOf(false) }
+
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Text(
-                "LIVE",
-                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "LIVE",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                )
 
-            if (data != null) {
-                val magnitude = sqrt(data.x * data.x + data.y * data.y + data.z * data.z)
+                // Sensor Selector Dropdown
+                ExposedDropdownMenuBox(
+                    expanded = dropdownExpanded,
+                    onExpandedChange = { dropdownExpanded = it }
+                ) {
+                    OutlinedButton(
+                        onClick = { dropdownExpanded = true },
+                        modifier = Modifier
+                            .menuAnchor()
+                            .testTag("sensor_selector")
+                    ) {
+                        Text(selectedSensor.displayName)
+                        Spacer(Modifier.width(4.dp))
+                        Icon(imageVector = Icons.Default.ExpandMore, contentDescription = null)
+                    }
 
-                LiveMetricRow(label = "Bx", value = String.format(Locale.US, "%8.1f µT", data.x))
-                LiveMetricRow(label = "By", value = String.format(Locale.US, "%8.1f µT", data.y))
-                LiveMetricRow(label = "Bz", value = String.format(Locale.US, "%8.1f µT", data.z))
+                    ExposedDropdownMenu(
+                        expanded = dropdownExpanded,
+                        onDismissRequest = { dropdownExpanded = false }
+                    ) {
+                        availableSensors.forEach { sensorClass ->
+                            DropdownMenuItem(
+                                text = { Text(sensorClass.displayName) },
+                                onClick = {
+                                    onSelectSensor(sensorClass)
+                                    dropdownExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+            if (reading != null) {
+                when (selectedSensor) {
+                    SensorTypeClass.MAGNETOMETER -> {
+                        val x = reading.values.getOrNull(0) ?: 0f
+                        val y = reading.values.getOrNull(1) ?: 0f
+                        val z = reading.values.getOrNull(2) ?: 0f
+                        MetricRow(label = "Bx", value = String.format(Locale.US, "%+8.2f µT", x))
+                        MetricRow(label = "By", value = String.format(Locale.US, "%+8.2f µT", y))
+                        MetricRow(label = "Bz", value = String.format(Locale.US, "%+8.2f µT", z))
+                    }
+                    SensorTypeClass.ACCELEROMETER -> {
+                        val x = reading.values.getOrNull(0) ?: 0f
+                        val y = reading.values.getOrNull(1) ?: 0f
+                        val z = reading.values.getOrNull(2) ?: 0f
+                        MetricRow(label = "Ax", value = String.format(Locale.US, "%+8.2f m/s²", x))
+                        MetricRow(label = "Ay", value = String.format(Locale.US, "%+8.2f m/s²", y))
+                        MetricRow(label = "Az", value = String.format(Locale.US, "%+8.2f m/s²", z))
+                    }
+                    SensorTypeClass.GYROSCOPE -> {
+                        val x = reading.values.getOrNull(0) ?: 0f
+                        val y = reading.values.getOrNull(1) ?: 0f
+                        val z = reading.values.getOrNull(2) ?: 0f
+                        MetricRow(label = "ωx", value = String.format(Locale.US, "%+8.4f rad/s", x))
+                        MetricRow(label = "ωy", value = String.format(Locale.US, "%+8.4f rad/s", y))
+                        MetricRow(label = "ωz", value = String.format(Locale.US, "%+8.4f rad/s", z))
+                    }
+                    SensorTypeClass.AMBIENT_LIGHT -> {
+                        val lux = reading.values.getOrNull(0) ?: 0f
+                        MetricRow(label = "Illuminance", value = String.format(Locale.US, "%.1f lx", lux))
+                    }
+                    SensorTypeClass.PRESSURE -> {
+                        val hPa = reading.values.getOrNull(0) ?: 0f
+                        MetricRow(label = "Pressure", value = String.format(Locale.US, "%.2f hPa", hPa))
+                    }
+                }
 
                 HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 
@@ -661,12 +939,17 @@ fun LiveSection(data: com.example.acquisition.MagnetometerData?) {
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        "|B|",
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                        "Rate",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Text(
-                        String.format(Locale.US, "%8.1f µT", magnitude),
-                        style = MaterialTheme.typography.titleMedium.copy(
+                        text = if (reading.observedHz > 0.1) {
+                            String.format(Locale.US, "%.1f Hz", reading.observedHz)
+                        } else {
+                            selectedSensor.rateDescription
+                        },
+                        style = MaterialTheme.typography.bodyMedium.copy(
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.primary
@@ -684,38 +967,86 @@ fun LiveSection(data: com.example.acquisition.MagnetometerData?) {
     }
 }
 
+// -------------------------------------------------------------
+// SESSION CARD
+// -------------------------------------------------------------
 @Composable
-private fun LiveMetricRow(label: String, value: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace)
-        )
-        Text(
-            text = value,
-            style = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace)
-        )
-    }
-}
-
-@Composable
-fun SessionSection(isRecording: Boolean, onToggleRecording: () -> Unit) {
+fun SessionCard(
+    sampleId: String,
+    onSampleIdChange: (String) -> Unit,
+    availableSensors: Map<SensorTypeClass, DiscoveredSensorMeta>,
+    selectedSensors: Set<SensorTypeClass>,
+    onToggleSensor: (SensorTypeClass) -> Unit,
+    isRecording: Boolean,
+    streamedCount: Long,
+    isConnected: Boolean,
+    onToggleRecording: () -> Unit
+) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text(
                 "SESSION",
                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
             )
-            Text("Sample: SMP-001", style = MaterialTheme.typography.bodyMedium)
-            Text("Rate: 50 Hz", style = MaterialTheme.typography.bodyMedium)
 
-            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = sampleId,
+                onValueChange = onSampleIdChange,
+                label = { Text("Sample ID") },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("sample_id_input"),
+                singleLine = true,
+                enabled = !isRecording
+            )
+
+            Text(
+                "Sensors",
+                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold)
+            )
+
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                for (sensorClass in SensorTypeClass.values()) {
+                    val isAvailable = availableSensors[sensorClass]?.isAvailable == true
+                    val isChecked = selectedSensors.contains(sensorClass) && isAvailable
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = isAvailable && !isRecording) {
+                                onToggleSensor(sensorClass)
+                            }
+                            .padding(vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = isChecked,
+                                onCheckedChange = { onToggleSensor(sensorClass) },
+                                enabled = isAvailable && !isRecording
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                text = sensorClass.displayName,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (isAvailable) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline
+                            )
+                        }
+                        Text(
+                            text = if (isAvailable) sensorClass.rateDescription else "NOT AVAILABLE",
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            color = if (isAvailable) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(4.dp))
+
             Button(
                 onClick = onToggleRecording,
                 modifier = Modifier
@@ -727,13 +1058,233 @@ fun SessionSection(isRecording: Boolean, onToggleRecording: () -> Unit) {
             ) {
                 Text(if (isRecording) "STOP CAPTURE" else "START CAPTURE")
             }
+
             if (isRecording) {
-                Text(
-                    "Recording magnetic field...",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Capturing physical sensor data...",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                    Text(
+                        "Packets: $streamedCount",
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold
+                        ),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
             }
         }
+    }
+}
+
+// -------------------------------------------------------------
+// ADVANCED CARD
+// -------------------------------------------------------------
+@Composable
+fun AdvancedCard(
+    diagnostics: NetworkDiagnostics,
+    connectionLogs: List<String>,
+    onConnectManual: (String) -> Unit,
+    isConnecting: Boolean
+) {
+    var isExpanded by remember { mutableStateOf(false) }
+    var manualUrl by remember { mutableStateOf("ws://192.168.254.3:8765/sensors") }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { isExpanded = !isExpanded }
+                    .padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "ADVANCED",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Diagnostics & manual URL",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Icon(
+                        imageVector = if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        contentDescription = null
+                    )
+                }
+            }
+
+            AnimatedVisibility(visible = isExpanded) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    // Manual Connect
+                    Text(
+                        "Connect Manually",
+                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
+                    )
+                    OutlinedTextField(
+                        value = manualUrl,
+                        onValueChange = { manualUrl = it },
+                        label = { Text("WebSocket URL") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("manual_url_input"),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                        singleLine = true
+                    )
+                    Button(
+                        onClick = { onConnectManual(manualUrl) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("connect_manually_button"),
+                        enabled = !isConnecting
+                    ) {
+                        Text("CONNECT MANUALLY")
+                    }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                    // ANDROID / NETWORK DIAGNOSTICS
+                    Text(
+                        "ANDROID / NETWORK DIAGNOSTICS",
+                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
+                    )
+                    DiagnosticItem("Android version", diagnostics.androidVersion)
+                    DiagnosticItem("SDK level", "${diagnostics.sdkLevel}")
+                    DiagnosticItem("Target SDK", "${diagnostics.targetSdk}")
+                    DiagnosticItem("Wi-Fi state", if (diagnostics.isWifiConnected) "CONNECTED" else "DISCONNECTED")
+                    DiagnosticItem("Device IP", diagnostics.localIp ?: "UNAVAILABLE")
+                    DiagnosticItem("Gateway", diagnostics.gateway ?: "UNAVAILABLE")
+                    DiagnosticItem("Nearby Devices permission", diagnostics.nearbyDevicesPermission.name)
+                    DiagnosticItem("Local Network permission", diagnostics.localNetworkPermission.name)
+                    DiagnosticItem("Discovered VirtualLab host", diagnostics.discoveredHost ?: "NONE")
+                    DiagnosticItem("Discovered VirtualLab port", diagnostics.discoveredPort?.toString() ?: "NONE")
+                    DiagnosticItem("TXT protocol_version", diagnostics.txtProtocol ?: "NONE")
+                    DiagnosticItem("TXT path", diagnostics.txtPath ?: "NONE")
+                    DiagnosticItem("Exact WebSocket URL", diagnostics.exactWsUrl ?: "NONE")
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                    // Raw Connection Log
+                    Text(
+                        "Raw Connection Log",
+                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
+                    )
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        shape = MaterialTheme.shapes.small,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 180.dp)
+                    ) {
+                        if (connectionLogs.isEmpty()) {
+                            Text(
+                                "No socket events logged yet.",
+                                modifier = Modifier.padding(8.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            LazyColumn(
+                                modifier = Modifier.padding(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                items(connectionLogs) { log ->
+                                    Text(
+                                        text = log,
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontFamily = FontFamily.Monospace,
+                                            fontSize = 11.sp
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// -------------------------------------------------------------
+// HELPER COMPONENTS
+// -------------------------------------------------------------
+@Composable
+private fun MetricRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyMedium.copy(
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Medium
+            )
+        )
+    }
+}
+
+@Composable
+private fun DiagnosticItem(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodySmall.copy(
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.SemiBold
+            ),
+            textAlign = TextAlign.End
+        )
+    }
+}
+
+@Composable
+private fun SubMetricRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace)
+        )
     }
 }

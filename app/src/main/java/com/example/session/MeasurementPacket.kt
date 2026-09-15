@@ -12,20 +12,21 @@ data class SensorMetadata(
 )
 
 @Serializable
-data class MagnetometerValues(
-    @SerialName("x_ut") val xUt: Float,
-    @SerialName("y_ut") val yUt: Float,
-    @SerialName("z_ut") val zUt: Float
-)
-
-@Serializable
 data class MeasurementPacket(
-    @SerialName("schema_version") val schemaVersion: String = "1.0",
+    @SerialName("schema_version") val schemaVersion: String = "1",
     @SerialName("device_id") val deviceId: String,
-    @SerialName("session_id") val sessionId: String,
+    @SerialName("source_session_id") val sourceSessionId: String,
+    // Backwards compatibility with existing VirtualLab /sensors gateway
+    @SerialName("session_id") val sessionId: String = sourceSessionId,
     @SerialName("measurement_type") val measurementType: String,
-    @SerialName("timestamp_monotonic_ns") val timestampMonotonicNs: Long,
+    @SerialName("sensor_id") val sensorId: String,
+    val sequence: Long,
+    @SerialName("device_timestamp_ns") val deviceTimestampNs: Long,
+    // Backwards compatibility with existing VirtualLab parser
+    @SerialName("timestamp_monotonic_ns") val timestampMonotonicNs: Long = deviceTimestampNs,
     @SerialName("timestamp_utc") val timestampUtc: String,
     val sensor: SensorMetadata,
-    val values: MagnetometerValues
+    val values: Map<String, Double>,
+    val units: Map<String, String>,
+    val accuracy: Int
 )
