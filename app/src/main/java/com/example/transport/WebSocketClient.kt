@@ -44,7 +44,7 @@ class WebSocketClient {
 
     private fun appendLog(line: String) {
         val timestamp = timeFormat.format(Date())
-        val formatted = "[$timestamp] $line"
+        val formatted = "[$timestamp] [SENSORS] $line"
         Log.i(TAG, formatted)
         val current = _connectionLogs.value.toMutableList()
         current.add(formatted)

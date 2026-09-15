@@ -143,6 +143,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _cameraWsState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val cameraWsState: StateFlow<ConnectionState> = _cameraWsState.asStateFlow()
 
+    private val _controlWsState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
+    val controlWsState: StateFlow<ConnectionState> = _controlWsState.asStateFlow()
+
     private var connectionJob: Job? = null
     private var cameraWsJob: Job? = null
     private var controlWsJob: Job? = null
@@ -251,9 +254,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             when (state) {
                 is ConnectionState.Connected -> {
                     _showLocalNetworkRestrictionWarning.value = false
-                    // Also connect dedicated camera transport if camera streaming is active
-                    connectCameraWsIfAppropriate(url)
-            connectControlWsIfAppropriate(url)
                 }
                 is ConnectionState.Error -> {
                     val isNearbyGranted = permissionManager.isNearbyWifiDevicesGranted()
@@ -263,10 +263,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             errorLower.contains("timed out") ||
                             errorLower.contains("failed to connect") ||
                             errorLower.contains("unreach") ||
-                            state.throwable is java.net.SocketTimeoutException ||
-                            state.throwable is java.net.ConnectException
+                            errorLower.contains("ehostunreach")
 
-                    if (isNearbyGranted && isLanTarget && isTimeoutOrUnreachable) {
+                    if (isLanTarget && isTimeoutOrUnreachable && !isNearbyGranted) {
                         _showLocalNetworkRestrictionWarning.value = true
                     }
                 }
@@ -274,6 +273,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             networkDiagnosticsManager.update()
         }.launchIn(viewModelScope)
+
+        // Connect the other channels immediately and independently
+        connectCameraWsIfAppropriate(url)
+        connectControlWsIfAppropriate(url)
     }
 
     private fun deriveCameraWsUrl(sensorWsUrl: String): String {
@@ -285,9 +288,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun connectControlWsIfAppropriate(sensorUrl: String) {
+        if (_controlWsState.value is ConnectionState.Connected || _controlWsState.value is ConnectionState.Connecting) return
         controlWsJob?.cancel()
         val controlUrl = sensorUrl.replace("/sensors", "/control")
         controlWsJob = controlWebSocketClient.connect(controlUrl).onEach { state ->
+            _controlWsState.value = state
             Log.d("MainViewModel", "Control WS State: $state")
         }.launchIn(viewModelScope)
         
@@ -301,6 +306,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun connectCameraWsIfAppropriate(sensorUrl: String) {
+        if (_cameraWsState.value is ConnectionState.Connected || _cameraWsState.value is ConnectionState.Connecting) return
         val cameraUrl = deriveCameraWsUrl(sensorUrl)
         cameraWsJob?.cancel()
         cameraWsJob = cameraWebSocketClient.connect(cameraUrl).onEach { state ->
@@ -317,11 +323,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         connectionJob = null
         cameraWsJob?.cancel()
         cameraWsJob = null
+        controlWsJob?.cancel()
+        controlWsJob = null
         webSocketClient.disconnect()
         cameraWebSocketClient.disconnect()
         controlWebSocketClient.disconnect()
         _connectionState.value = ConnectionState.Disconnected
         _cameraWsState.value = ConnectionState.Disconnected
+        _controlWsState.value = ConnectionState.Disconnected
         _connectedEndpoint.value = null
         networkDiagnosticsManager.updateDiscoveredService(null)
     }

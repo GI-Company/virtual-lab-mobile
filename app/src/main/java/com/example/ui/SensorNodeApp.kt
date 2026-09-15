@@ -13,6 +13,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Circle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.ExpandLess
@@ -89,6 +90,7 @@ fun SensorNodeApp(
     val lastCapturedFrame by viewModel.lastCapturedFrame.collectAsState()
     val cameraErrorMessage by viewModel.cameraErrorMessage.collectAsState()
     val cameraWsState by viewModel.cameraWsState.collectAsState()
+    val controlWsState by viewModel.controlWsState.collectAsState()
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -199,6 +201,8 @@ fun SensorNodeApp(
                 VirtualLabCard(
                     discoveryState = discoveryState,
                     connectionState = connectionState,
+                    cameraWsState = cameraWsState,
+                    controlWsState = controlWsState,
                     connectedEndpoint = connectedEndpoint,
                     isUsbDevMode = viewModel.isUsbDevelopmentUrl(connectedEndpoint),
                     onConnect = { device ->
@@ -510,6 +514,8 @@ fun NetworkCard(
 fun VirtualLabCard(
     discoveryState: DiscoveryState,
     connectionState: ConnectionState,
+    cameraWsState: ConnectionState,
+    controlWsState: ConnectionState,
     connectedEndpoint: String?,
     isUsbDevMode: Boolean,
     onConnect: (DiscoveredVirtualLab) -> Unit,
@@ -531,7 +537,6 @@ fun VirtualLabCard(
                     "VIRTUAL LAB",
                     style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
                 )
-
                 val stateLabel = when (connectionState) {
                     is ConnectionState.Connected -> "CONNECTED"
                     is ConnectionState.Connecting -> "CONNECTING"
@@ -607,203 +612,119 @@ fun VirtualLabCard(
             }
 
             // Connected or connecting state
-            when (connectionState) {
-                is ConnectionState.Connected -> {
-                    Surface(
-                        color = MaterialTheme.colorScheme.primaryContainer,
-                        shape = MaterialTheme.shapes.medium,
-                        modifier = Modifier.fillMaxWidth()
+            if (connectedEndpoint != null) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                    shape = MaterialTheme.shapes.medium,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
+                        Text("VIRTUAL LAB CHANNELS", style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold))
+                        
+                        val baseUrl = connectedEndpoint.replace("/sensors", "").trimEnd('/')
+                        ChannelStatusRow("Sensors", "/sensors", "$baseUrl/sensors", connectionState)
+                        ChannelStatusRow("Imaging", "/camera", "$baseUrl/camera", cameraWsState)
+                        ChannelStatusRow("Control", "/control", "$baseUrl/control", controlWsState)
+                        
+                        Button(
+                            onClick = onDisconnect,
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                        ) {
+                            Text("DISCONNECT")
+                        }
+                    }
+                }
+            } else {
+                // Show discovery results
+                when (discoveryState) {
+                    is DiscoveryState.Searching, is DiscoveryState.Idle -> {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(12.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
+                                .padding(vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        imageVector = Icons.Default.CheckCircle,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Spacer(Modifier.width(6.dp))
-                                    Text(
-                                        "VirtualLab Desktop",
-                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
-                                    )
-                                }
-                                Spacer(Modifier.height(4.dp))
-                                Text(
-                                    text = connectedEndpoint ?: "",
-                                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer
-                                )
-                            }
-                            Button(
-                                onClick = onDisconnect,
-                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                                modifier = Modifier.testTag("disconnect_button")
-                            ) {
-                                Text("DISCONNECT")
-                            }
-                        }
-                    }
-                }
-                is ConnectionState.Connecting -> {
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        shape = MaterialTheme.shapes.medium,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                                Spacer(Modifier.width(12.dp))
-                                Column {
-                                    Text(
-                                        "CONNECTING...",
-                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
-                                    )
-                                    Text(
-                                        connectedEndpoint ?: "",
-                                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
-                                    )
-                                }
-                            }
-                            OutlinedButton(onClick = onDisconnect) {
-                                Text("CANCEL")
-                            }
-                        }
-                    }
-                }
-                is ConnectionState.Error -> {
-                    Surface(
-                        color = MaterialTheme.colorScheme.errorContainer,
-                        shape = MaterialTheme.shapes.small,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    "CONNECTION FAILED",
-                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                                    color = MaterialTheme.colorScheme.error
-                                )
-                                Text(
-                                    text = connectionState.message,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onErrorContainer
-                                )
-                            }
-                            TextButton(onClick = onDisconnect) {
-                                Text("DISMISS", color = MaterialTheme.colorScheme.error)
-                            }
-                        }
-                    }
-                }
-                is ConnectionState.Disconnected -> {
-                    // Show discovery results
-                    when (discoveryState) {
-                        is DiscoveryState.Searching, is DiscoveryState.Idle -> {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                                Spacer(Modifier.width(12.dp))
-                                Text(
-                                    "Searching for VirtualLab...",
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
-                            }
-                        }
-                        is DiscoveryState.PermissionRequired -> {
-                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Text(
-                                    "Local network discovery requires Nearby Devices permission.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.error
-                                )
-                                Button(
-                                    onClick = onRequestPermission,
-                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                                    modifier = Modifier.testTag("grant_access_button")
-                                ) {
-                                    Text("GRANT ACCESS")
-                                }
-                            }
-                        }
-                        is DiscoveryState.Found -> {
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                discoveryState.devices.forEach { device ->
-                                    DiscoveredDeviceCard(
-                                        device = device,
-                                        onConnect = { onConnect(device) }
-                                    )
-                                }
-                            }
-                        }
-                        is DiscoveryState.Empty -> {
-                            Surface(
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                                shape = MaterialTheme.shapes.small,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(12.dp),
-                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Text(
-                                        "NO VIRTUAL LAB FOUND",
-                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    Text(
-                                        "Ensure VirtualLab Desktop is running on the same local Wi-Fi network.",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
-                                        textAlign = TextAlign.Center
-                                    )
-                                    Button(
-                                        onClick = onRetrySearch,
-                                        modifier = Modifier.testTag("retry_search_button")
-                                    ) {
-                                        Icon(imageVector = Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                                        Spacer(Modifier.width(6.dp))
-                                        Text("Retry Search")
-                                    }
-                                }
-                            }
-                        }
-                        is DiscoveryState.Error -> {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(12.dp))
                             Text(
-                                "Discovery error: ${discoveryState.message}",
+                                "Searching for VirtualLab...",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                    }
+                    is DiscoveryState.PermissionRequired -> {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                "Local network discovery requires Nearby Devices permission.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.error
                             )
-                            Button(onClick = onRetrySearch, modifier = Modifier.testTag("retry_search_button")) {
-                                Text("Retry Search")
+                            Button(
+                                onClick = onRequestPermission,
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                                modifier = Modifier.testTag("grant_access_button")
+                            ) {
+                                Text("GRANT ACCESS")
                             }
+                        }
+                    }
+                    is DiscoveryState.Found -> {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            discoveryState.devices.forEach { device ->
+                                DiscoveredDeviceCard(
+                                    device = device,
+                                    onConnect = { onConnect(device) }
+                                )
+                            }
+                        }
+                    }
+                    is DiscoveryState.Empty -> {
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                            shape = MaterialTheme.shapes.small,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    "NO VIRTUAL LAB FOUND",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    "Ensure VirtualLab Desktop is running on the same local Wi-Fi network.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                                    textAlign = TextAlign.Center
+                                )
+                                Button(
+                                    onClick = onRetrySearch,
+                                    modifier = Modifier.testTag("retry_search_button")
+                                ) {
+                                    Icon(imageVector = Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Retry Search")
+                                }
+                            }
+                        }
+                    }
+                    is DiscoveryState.Error -> {
+                        Text(
+                            "Discovery error: ${discoveryState.message}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                        Button(onClick = onRetrySearch) {
+                            Text("Retry Search")
                         }
                     }
                 }
@@ -811,9 +732,8 @@ fun VirtualLabCard(
         }
     }
 }
-
 @Composable
-private fun DiscoveredDeviceCard(
+fun DiscoveredDeviceCard(
     device: DiscoveredVirtualLab,
     onConnect: () -> Unit
 ) {
@@ -1449,5 +1369,36 @@ private fun SubMetricRow(label: String, value: String) {
             text = value,
             style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace)
         )
+    }
+}
+
+@Composable
+fun ChannelStatusRow(name: String, path: String, url: String, state: ConnectionState) {
+    val stateText = when (state) {
+        is ConnectionState.Connected -> "CONNECTED"
+        is ConnectionState.Connecting -> "CONNECTING"
+        is ConnectionState.Error -> "FAILED"
+        is ConnectionState.Disconnected -> "DISCONNECTED"
+    }
+    val color = when (state) {
+        is ConnectionState.Connected -> MaterialTheme.colorScheme.primary
+        is ConnectionState.Connecting -> MaterialTheme.colorScheme.secondary
+        is ConnectionState.Error -> MaterialTheme.colorScheme.error
+        is ConnectionState.Disconnected -> MaterialTheme.colorScheme.outline
+    }
+
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Text(name, style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold))
+        Text(path, style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold))
+        Text(url, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace), color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 2.dp)) {
+            Icon(imageVector = Icons.Default.Circle, contentDescription = null, tint = color, modifier = Modifier.size(10.dp))
+            Spacer(Modifier.width(6.dp))
+            Text(stateText, style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold), color = color)
+            if (state is ConnectionState.Error) {
+                Spacer(Modifier.width(6.dp))
+                Text(state.message, style = MaterialTheme.typography.labelSmall, color = color, maxLines = 1)
+            }
+        }
     }
 }
