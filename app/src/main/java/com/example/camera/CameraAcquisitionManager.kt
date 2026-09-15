@@ -27,6 +27,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.UUID
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 class CameraAcquisitionManager(
     private val context: Context,
@@ -86,6 +88,10 @@ class CameraAcquisitionManager(
     private var activeLensFacingStr: String = "BACK"
     private var activeParentLogicalId: String? = null
     private var isPhysicalMember = false
+    private var activeDeviceId: String = ""
+    
+    private var activeCharacteristics: CameraCharacteristics? = null
+    private var currentControlParams = ControlParameters()
 
     init {
         startBackgroundThread()
@@ -127,8 +133,9 @@ class CameraAcquisitionManager(
         activeLensFacingStr = camera.lensFacing.name
         activeParentLogicalId = camera.parentLogicalCameraId
         isPhysicalMember = camera.parentLogicalCameraId != null
-
+        activeDeviceId = deviceId
         _cameraErrorMessage.value = null
+        currentControlParams = ControlParameters()
         frameSequence = 0L
         totalFrames = 0L
         droppedFrames = 0L
@@ -141,6 +148,7 @@ class CameraAcquisitionManager(
 
         try {
             val chars = cameraManager.getCameraCharacteristics(camera.id)
+            activeCharacteristics = chars
             val streamMap = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
             val jpegSizes = streamMap?.getOutputSizes(ImageFormat.JPEG) ?: emptyArray()
 
@@ -148,9 +156,20 @@ class CameraAcquisitionManager(
             val previewSize = selectPreviewSize(jpegSizes)
             val stillSize = jpegSizes.maxByOrNull { it.width * it.height } ?: previewSize
 
+            val fpsRanges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+            val targetRange = fpsRanges?.firstOrNull { it.lower in 10..15 && it.upper in 15..30 }
+                                ?: fpsRanges?.firstOrNull { it.upper <= 30 }
+            val rangeStr = targetRange?.let { "${it.lower}-${it.upper}" } ?: "UNKNOWN"
+
             _liveStats.value = LiveCameraStats(
                 cameraId = camera.id,
                 cameraLabel = camera.friendlyName,
+                logicalCameraId = camera.parentLogicalCameraId,
+                physicalCameraId = if (camera.parentLogicalCameraId != null) camera.id else null,
+                lensFacing = camera.lensFacing.name,
+                hardwareLevel = camera.hardwareLevel,
+                hasRaw = camera.hasRaw,
+                configuredFpsRange = rangeStr,
                 resolution = "${previewSize.width}x${previewSize.height}",
                 thermalStatus = thermalMonitor.thermalStatus.value
             )
@@ -179,7 +198,8 @@ class CameraAcquisitionManager(
                 }, handler)
             }
 
-            cameraManager.openCamera(camera.id, object : CameraDevice.StateCallback() {
+            val cameraToOpen = camera.parentLogicalCameraId ?: camera.id
+            cameraManager.openCamera(cameraToOpen, object : CameraDevice.StateCallback() {
                 override fun onOpened(device: CameraDevice) {
                     activeCameraDevice = device
                     createCaptureSession(device, chars, previewSize)
@@ -241,10 +261,7 @@ class CameraAcquisitionManager(
         val stillReader = stillImageReader ?: return
 
         try {
-            val surfaces = listOf(previewReader.surface, stillReader.surface)
-
-            @Suppress("DEPRECATION")
-            device.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
+            val stateCallback = object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(session: CameraCaptureSession) {
                     activeCaptureSession = session
                     _isStreaming.value = true
@@ -254,8 +271,7 @@ class CameraAcquisitionManager(
                     try {
                         val requestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                             addTarget(previewReader.surface)
-                            set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
-                            set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                            applyControlParametersToBuilder(this)
 
                             // Set conservative FPS ~10-15 FPS
                             val fpsRanges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
@@ -298,7 +314,28 @@ class CameraAcquisitionManager(
                     _cameraErrorMessage.value = "HAL rejected camera session configuration"
                     Log.e(TAG, "Camera session configuration failed")
                 }
-            }, handler)
+            }
+
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                val previewOutput = android.hardware.camera2.params.OutputConfiguration(previewReader.surface)
+                if (isPhysicalMember) previewOutput.setPhysicalCameraId(activeCameraId)
+                
+                val stillOutput = android.hardware.camera2.params.OutputConfiguration(stillReader.surface)
+                if (isPhysicalMember) stillOutput.setPhysicalCameraId(activeCameraId)
+
+                val executor = java.util.concurrent.Executor { handler.post(it) }
+                val sessionConfig = android.hardware.camera2.params.SessionConfiguration(
+                    android.hardware.camera2.params.SessionConfiguration.SESSION_REGULAR,
+                    listOf(previewOutput, stillOutput),
+                    executor,
+                    stateCallback
+                )
+                device.createCaptureSession(sessionConfig)
+            } else {
+                val surfaces = listOf(previewReader.surface, stillReader.surface)
+                @Suppress("DEPRECATION")
+                device.createCaptureSession(surfaces, stateCallback, handler)
+            }
         } catch (e: Exception) {
             _cameraErrorMessage.value = "Failed creating capture session: ${e.message}"
             Log.e(TAG, "Failed creating capture session", e)
@@ -353,9 +390,7 @@ class CameraAcquisitionManager(
             val focusDist = result?.get(CaptureResult.LENS_FOCUS_DISTANCE)
             val devTimestamp = result?.get(CaptureResult.SENSOR_TIMESTAMP) ?: nowNs
 
-            _liveStats.value = LiveCameraStats(
-                cameraId = activeCameraId,
-                cameraLabel = activeCameraLabel,
+            _liveStats.value = _liveStats.value.copy(
                 resolution = "${image.width}x${image.height}",
                 observedFps = Math.round(observedFps * 10.0) / 10.0,
                 totalFrames = totalFrames,
@@ -376,8 +411,31 @@ class CameraAcquisitionManager(
             }
 
             // Create metadata packet
+            val afModeInt = result?.get(CaptureResult.CONTROL_AF_MODE)
+            val afStateInt = result?.get(CaptureResult.CONTROL_AF_STATE)
+            val aeModeInt = result?.get(CaptureResult.CONTROL_AE_MODE)
+            val aeStateInt = result?.get(CaptureResult.CONTROL_AE_STATE)
+            val awbModeInt = result?.get(CaptureResult.CONTROL_AWB_MODE)
+            val awbStateInt = result?.get(CaptureResult.CONTROL_AWB_STATE)
+            val awbLockResult = result?.get(CaptureResult.CONTROL_AWB_LOCK)
+            val frameDurationNs = result?.get(CaptureResult.SENSOR_FRAME_DURATION)
+            val fpsRangeResult = result?.get(CaptureResult.CONTROL_AE_TARGET_FPS_RANGE)
+            val fpsRangeStr = fpsRangeResult?.let { "${it.lower}-${it.upper}" }
+            val cropRegion = result?.get(CaptureResult.SCALER_CROP_REGION)
+            val zoomRatio = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) result?.get(CaptureResult.CONTROL_ZOOM_RATIO) else null
+            
+            val stabModeInt = result?.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE)
+            val vidStabModeInt = result?.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE)
+            val stabStr = if (vidStabModeInt == CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE_ON) "VIDEO_ON" 
+                          else if (stabModeInt == CaptureResult.LENS_OPTICAL_STABILIZATION_MODE_ON) "OPTICAL_ON"
+                          else "OFF"
+                          
+            val flashModeInt = result?.get(CaptureResult.FLASH_MODE)
+            val torchStr = if (flashModeInt == CaptureResult.FLASH_MODE_TORCH) "ON" else "OFF"
+            
             val metadata = CameraFrameMetadata(
                 schemaVersion = "1",
+                messageType = "CAMERA_PREVIEW_FRAME",
                 deviceId = deviceId,
                 cameraId = activeCameraId,
                 logicalCameraId = activeParentLogicalId,
@@ -397,7 +455,20 @@ class CameraAcquisitionManager(
                 frameSizeBytes = bytes.size,
                 scientificState = "MEASURED",
                 acquisitionType = "CAMERA_FRAME",
-                representation = "ISP_PROCESSED"
+                representation = "ISP_PROCESSED",
+                frameDurationNs = frameDurationNs,
+                afMode = afModeInt?.toString(),
+                afState = afStateInt?.toString(),
+                aeMode = aeModeInt?.toString(),
+                aeState = aeStateInt?.toString(),
+                awbMode = awbModeInt?.toString(),
+                awbState = awbStateInt?.toString(),
+                awbLock = awbLockResult,
+                fpsRange = fpsRangeStr,
+                cropRegion = cropRegion?.let { "${it.left},${it.top},${it.width()},${it.height()}" },
+                zoomRatio = zoomRatio,
+                stabilizationMode = stabStr,
+                torchState = torchStr
             )
 
             // Emit frame for WebSocket streaming
@@ -411,7 +482,7 @@ class CameraAcquisitionManager(
         }
     }
 
-    fun captureScientificFrame() {
+    fun captureScientificFrame(captureId: String? = null) {
         val session = activeCaptureSession ?: run {
             _cameraErrorMessage.value = "Cannot capture: camera session not active"
             return
@@ -423,10 +494,11 @@ class CameraAcquisitionManager(
         try {
             val captureBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                 addTarget(stillReader.surface)
-                set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
-                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                applyControlParametersToBuilder(this)
                 set(CaptureRequest.JPEG_QUALITY, 95.toByte())
+                captureId?.let { setTag(it) } // Use tag to pass captureId if possible, or just generate internally
             }
+            val finalCaptureId = captureId ?: ("CAP-" + System.currentTimeMillis() + "-" + java.util.UUID.randomUUID().toString().take(6))
 
             session.capture(captureBuilder.build(), object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureCompleted(
@@ -466,8 +538,11 @@ class CameraAcquisitionManager(
             val bytes = ByteArray(buffer.remaining())
             buffer.get(bytes)
 
-            val captureId = "CAP-" + System.currentTimeMillis() + "-" + UUID.randomUUID().toString().take(6)
+            val captureId = image.timestamp.toString() // fallback
+            // To properly match, we'd need to extract from request tag, but we will use the same ID logic or rely on timestamp correlation. We'll just generate one if not passed.
+            // Wait, we need to pass the real captureId. We can pull it from the capture queue or keep it simple.
             val result = latestCaptureResult
+            val realCaptureId = result?.request?.tag as? String ?: ("CAP-" + System.currentTimeMillis() + "-" + java.util.UUID.randomUUID().toString().take(6))
             val expTime = result?.get(CaptureResult.SENSOR_EXPOSURE_TIME)
             val iso = result?.get(CaptureResult.SENSOR_SENSITIVITY)
             val focalLen = result?.get(CaptureResult.LENS_FOCAL_LENGTH)
@@ -475,7 +550,7 @@ class CameraAcquisitionManager(
             val timestampNs = result?.get(CaptureResult.SENSOR_TIMESTAMP) ?: System.nanoTime()
 
             val scientificFrame = ScientificCapturedFrame(
-                captureId = captureId,
+                captureId = realCaptureId,
                 cameraId = activeCameraId,
                 cameraLabel = activeCameraLabel,
                 timestampNs = timestampNs,
@@ -490,7 +565,70 @@ class CameraAcquisitionManager(
             )
 
             _lastCapturedFrame.value = scientificFrame
-            Log.i(TAG, "Scientific frame captured: $captureId (${image.width}x${image.height}, ${bytes.size} bytes)")
+
+            val afModeInt = result?.get(CaptureResult.CONTROL_AF_MODE)
+            val afStateInt = result?.get(CaptureResult.CONTROL_AF_STATE)
+            val aeModeInt = result?.get(CaptureResult.CONTROL_AE_MODE)
+            val aeStateInt = result?.get(CaptureResult.CONTROL_AE_STATE)
+            val awbModeInt = result?.get(CaptureResult.CONTROL_AWB_MODE)
+            val awbStateInt = result?.get(CaptureResult.CONTROL_AWB_STATE)
+            val awbLockResult = result?.get(CaptureResult.CONTROL_AWB_LOCK)
+            val frameDurationNs = result?.get(CaptureResult.SENSOR_FRAME_DURATION)
+            val fpsRangeResult = result?.get(CaptureResult.CONTROL_AE_TARGET_FPS_RANGE)
+            val fpsRangeStr = fpsRangeResult?.let { "${it.lower}-${it.upper}" }
+            val cropRegion = result?.get(CaptureResult.SCALER_CROP_REGION)
+            val zoomRatio = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) result?.get(CaptureResult.CONTROL_ZOOM_RATIO) else null
+            
+            val stabModeInt = result?.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE)
+            val vidStabModeInt = result?.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE)
+            val stabStr = if (vidStabModeInt == CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE_ON) "VIDEO_ON" 
+                          else if (stabModeInt == CaptureResult.LENS_OPTICAL_STABILIZATION_MODE_ON) "OPTICAL_ON"
+                          else "OFF"
+                          
+            val flashModeInt = result?.get(CaptureResult.FLASH_MODE)
+            val torchStr = if (flashModeInt == CaptureResult.FLASH_MODE_TORCH) "ON" else "OFF"
+            
+            val metadata = CameraFrameMetadata(
+                schemaVersion = "1",
+                messageType = "CAMERA_SCIENTIFIC_FRAME",
+                deviceId = activeDeviceId,
+                cameraId = activeCameraId,
+                logicalCameraId = activeParentLogicalId,
+                physicalCameraId = if (isPhysicalMember) activeCameraId else null,
+                frameSequence = frameSequence,
+                deviceTimestampNs = timestampNs,
+                width = image.width,
+                height = image.height,
+                pixelFormat = "JPEG",
+                encoding = "JPEG",
+                orientation = 0,
+                lensFacing = activeLensFacingStr,
+                focalLengthMm = focalLen,
+                exposureTimeNs = expTime,
+                sensorSensitivityIso = iso,
+                focusDistance = focusDist,
+                frameSizeBytes = bytes.size,
+                scientificState = "MEASURED",
+                acquisitionType = "CAMERA_FRAME",
+                representation = "ISP_PROCESSED",
+                frameDurationNs = frameDurationNs,
+                afMode = afModeInt?.toString(),
+                afState = afStateInt?.toString(),
+                aeMode = aeModeInt?.toString(),
+                aeState = aeStateInt?.toString(),
+                awbMode = awbModeInt?.toString(),
+                awbState = awbStateInt?.toString(),
+                awbLock = awbLockResult,
+                fpsRange = fpsRangeStr,
+                cropRegion = cropRegion?.let { "${it.left},${it.top},${it.width()},${it.height()}" },
+                zoomRatio = zoomRatio,
+                stabilizationMode = stabStr,
+                torchState = torchStr,
+                captureId = realCaptureId
+            )
+            _frameFlow.tryEmit(Pair(metadata, bytes))
+
+            Log.i(TAG, "Scientific frame captured: $realCaptureId (${image.width}x${image.height}, ${bytes.size} bytes)")
         } catch (e: Exception) {
             Log.e(TAG, "Error handling still image: ${e.message}", e)
         } finally {
@@ -532,4 +670,214 @@ class CameraAcquisitionManager(
         stopCameraStream()
         stopBackgroundThread()
     }
+
+    private fun applyControlParametersToBuilder(builder: CaptureRequest.Builder) {
+        val params = currentControlParams
+        
+        // Base auto mode if no manual controls are specified
+        builder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+
+        // Focus
+        when (params.afMode) {
+            "OFF", "MANUAL" -> {
+                builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+                params.focusDistanceDiopters?.let {
+                    builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, it)
+                }
+            }
+            "AUTO" -> builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
+            "MACRO" -> builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_MACRO)
+            "CONTINUOUS_VIDEO" -> builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+            "CONTINUOUS_PICTURE" -> builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            "EDOF" -> builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_EDOF)
+            else -> builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+        }
+
+        // Exposure
+        when (params.aeMode) {
+            "OFF", "MANUAL" -> {
+                builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                params.exposureTimeNs?.let {
+                    builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, it)
+                }
+                params.iso?.let {
+                    builder.set(CaptureRequest.SENSOR_SENSITIVITY, it)
+                }
+                params.frameDurationNs?.let {
+                    builder.set(CaptureRequest.SENSOR_FRAME_DURATION, it)
+                }
+            }
+            "ON" -> builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+            "ON_AUTO_FLASH" -> builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH)
+            "ON_ALWAYS_FLASH" -> builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH)
+            "ON_AUTO_FLASH_REDEYE" -> builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH_REDEYE)
+            else -> builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+        }
+        
+        params.aeCompensation?.let {
+            builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, it)
+        }
+
+        // AWB
+        when (params.awbMode) {
+            "OFF" -> builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF)
+            "AUTO" -> builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+            "INCANDESCENT" -> builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_INCANDESCENT)
+            "FLUORESCENT" -> builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_FLUORESCENT)
+            "WARM_FLUORESCENT" -> builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_WARM_FLUORESCENT)
+            "DAYLIGHT" -> builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT)
+            "CLOUDY_DAYLIGHT" -> builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT)
+            "TWILIGHT" -> builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_TWILIGHT)
+            "SHADE" -> builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_SHADE)
+            else -> builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+        }
+        
+        params.awbLock?.let {
+            builder.set(CaptureRequest.CONTROL_AWB_LOCK, it)
+        }
+        
+        // FPS Range
+        params.fpsRange?.let { rangeStr ->
+            val parts = rangeStr.split("-")
+            if (parts.size == 2) {
+                val min = parts[0].toIntOrNull()
+                val max = parts[1].toIntOrNull()
+                if (min != null && max != null) {
+                    builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, android.util.Range(min, max))
+                }
+            }
+        }
+        
+        // Stabilization
+        when (params.opticalStabilization) {
+            "ON" -> builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
+            "OFF" -> builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
+        }
+        
+        when (params.videoStabilization) {
+            "ON" -> builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON)
+            "OFF" -> builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
+        }
+        
+        // Torch
+        when (params.torch) {
+            "ON" -> builder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
+            "OFF" -> builder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+        }
+        
+        // Digital Zoom (Crop Region)
+        params.zoomRatio?.let { ratio ->
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, ratio)
+            }
+        }
+    }
+
+    private fun updateRepeatingRequest() {
+        val device = activeCameraDevice ?: return
+        val session = activeCaptureSession ?: return
+        val previewReader = previewImageReader ?: return
+        val handler = backgroundHandler ?: return
+        
+        try {
+            val requestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                addTarget(previewReader.surface)
+                applyControlParametersToBuilder(this)
+            }
+            session.setRepeatingRequest(
+                requestBuilder.build(),
+                object : CameraCaptureSession.CaptureCallback() {
+                    override fun onCaptureCompleted(
+                        session: CameraCaptureSession,
+                        request: CaptureRequest,
+                        result: TotalCaptureResult
+                    ) {
+                        latestCaptureResult = result
+                    }
+                    override fun onCaptureFailed(
+                        session: CameraCaptureSession,
+                        request: CaptureRequest,
+                        failure: CaptureFailure
+                    ) {
+                        droppedFrames++
+                    }
+                },
+                handler
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to update repeating request", e)
+        }
+    }
+
+    private val json = kotlinx.serialization.json.Json { encodeDefaults = true }
+
+    fun processControlCommand(command: CameraControlMessage, sendResult: (String) -> Unit) {
+        if (activeCameraDevice == null || activeCharacteristics == null) {
+            sendResult(json.encodeToString(CameraControlResult(
+                requestId = command.requestId,
+                status = "FAILED",
+                errorReason = "CAMERA_NOT_ACTIVE"
+            )))
+            return
+        }
+        
+        when (command.messageType) {
+            "GET_CAMERA_CAPABILITIES" -> {
+                val caps = activeCharacteristics!!.getCameraCapabilitiesPayload()
+                sendResult(json.encodeToString(CameraCapabilitiesResponse(
+                    requestId = command.requestId,
+                    deviceId = activeDeviceId,
+                    cameraId = activeCameraId,
+                    capabilities = caps
+                )))
+            }
+            "GET_CAMERA_STATE" -> {
+                sendResult(json.encodeToString(CameraStateResponse(
+                    requestId = command.requestId,
+                    deviceId = activeDeviceId,
+                    cameraId = activeCameraId,
+                    state = currentControlParams
+                )))
+            }
+            "SET_CAMERA_CONTROLS" -> {
+                val requested = command.parameters
+                if (requested != null) {
+                    val oldRes = currentControlParams.resolution
+                    val newRes = requested.resolution ?: oldRes
+                    
+                    currentControlParams = currentControlParams.copy(
+                        afMode = requested.afMode ?: currentControlParams.afMode,
+                        focusDistanceDiopters = requested.focusDistanceDiopters ?: currentControlParams.focusDistanceDiopters,
+                        aeMode = requested.aeMode ?: currentControlParams.aeMode,
+                        exposureTimeNs = requested.exposureTimeNs ?: currentControlParams.exposureTimeNs,
+                        iso = requested.iso ?: currentControlParams.iso,
+                        frameDurationNs = requested.frameDurationNs ?: currentControlParams.frameDurationNs,
+                        aeCompensation = requested.aeCompensation ?: currentControlParams.aeCompensation,
+                        awbMode = requested.awbMode ?: currentControlParams.awbMode,
+                        awbLock = requested.awbLock ?: currentControlParams.awbLock,
+                        fpsRange = requested.fpsRange ?: currentControlParams.fpsRange,
+                        resolution = newRes,
+                        zoomRatio = requested.zoomRatio ?: currentControlParams.zoomRatio,
+                        cropRegion = requested.cropRegion ?: currentControlParams.cropRegion,
+                        opticalStabilization = requested.opticalStabilization ?: currentControlParams.opticalStabilization,
+                        videoStabilization = requested.videoStabilization ?: currentControlParams.videoStabilization,
+                        torch = requested.torch ?: currentControlParams.torch
+                    )
+                    
+                    updateRepeatingRequest()
+                    
+                    sendResult(json.encodeToString(CameraControlResult(
+                        requestId = command.requestId,
+                        status = "APPLIED",
+                        requested = requested,
+                        applied = currentControlParams
+                    )))
+                }
+            }
+            "CAPTURE_SCIENTIFIC_FRAME" -> {
+                captureScientificFrame(command.requestId)
+            }
+        }
+    }
+
 }

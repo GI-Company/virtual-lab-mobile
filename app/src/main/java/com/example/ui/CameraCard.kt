@@ -107,7 +107,7 @@ fun CamerasInventoryCard(
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        text = "${discoveredCameras.size} DETECTED",
+                        text = "${discoveredCameras.size} UNIQUE CAMERA2 IDs",
                         style = MaterialTheme.typography.labelSmall.copy(
                             fontWeight = FontWeight.Bold,
                             fontFamily = FontFamily.Monospace
@@ -130,6 +130,36 @@ fun CamerasInventoryCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
+            if (discoveredCameras.isNotEmpty()) {
+                val logicalCount = discoveredCameras.count { it.isLogical }
+                val physicalMemberCount = discoveredCameras.count { it.parentLogicalCameraId != null }
+                val standaloneCount = discoveredCameras.count { !it.isLogical && it.parentLogicalCameraId == null }
+                
+                val breakdownText = buildString {
+                    if (logicalCount > 0) append("$logicalCount LOGICAL SYSTEM${if (logicalCount > 1) "S" else ""}")
+                    if (physicalMemberCount > 0) {
+                        if (isNotEmpty()) append(" • ")
+                        append("$physicalMemberCount PHYSICAL MEMBER${if (physicalMemberCount > 1) "S" else ""}")
+                    }
+                    if (standaloneCount > 0) {
+                        if (isNotEmpty()) append(" • ")
+                        append("$standaloneCount STANDALONE ENDPOINT${if (standaloneCount > 1) "S" else ""}")
+                    }
+                }
+
+                if (breakdownText.isNotEmpty()) {
+                    Text(
+                        text = breakdownText,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontWeight = FontWeight.Medium,
+                            fontFamily = FontFamily.Monospace
+                        ),
+                        color = MaterialTheme.colorScheme.secondary,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
+            }
+
             HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 
             if (permissionState != CameraPermissionState.GRANTED) {
@@ -151,10 +181,36 @@ fun CamerasInventoryCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             } else {
-                discoveredCameras.forEach { cam ->
-                    DiscoveredCameraItem(cam)
-                    if (cam != discoveredCameras.last()) {
+                val logicalCameras = discoveredCameras.filter { it.isLogical }
+                val standaloneCameras = discoveredCameras.filter { !it.isLogical && it.parentLogicalCameraId == null }
+
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // Render Logical Systems and their Physical Members
+                    logicalCameras.forEach { logicalCam ->
+                        DiscoveredCameraItem(cam = logicalCam, isChild = false, isLastChild = false)
+                        
+                        val physicalMembers = discoveredCameras.filter { it.parentLogicalCameraId == logicalCam.id }
+                        physicalMembers.forEachIndexed { index, physicalCam ->
+                            val isLast = index == physicalMembers.size - 1
+                            DiscoveredCameraItem(cam = physicalCam, isChild = true, isLastChild = isLast)
+                        }
+                    }
+
+                    if (logicalCameras.isNotEmpty() && standaloneCameras.isNotEmpty()) {
                         HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                    }
+
+                    // Render Standalone Endpoints
+                    if (standaloneCameras.isNotEmpty()) {
+                        Text(
+                            text = "Standalone Camera2 Endpoints",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)
+                        )
+                        standaloneCameras.forEach { cam ->
+                            DiscoveredCameraItem(cam = cam, isChild = false, isLastChild = false)
+                        }
                     }
                 }
             }
@@ -163,42 +219,52 @@ fun CamerasInventoryCard(
 }
 
 @Composable
-fun DiscoveredCameraItem(cam: DiscoveredCamera) {
+fun DiscoveredCameraItem(cam: DiscoveredCamera, isChild: Boolean = false, isLastChild: Boolean = false) {
     var expanded by remember { mutableStateOf(false) }
 
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = cam.friendlyName,
-                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
-                )
-                Text(
-                    text = "${cam.mpClass} • Camera2 ID: ${cam.id}${if (cam.parentLogicalCameraId != null) " (Member of ${cam.parentLogicalCameraId})" else ""}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            Surface(
-                color = if (cam.status == "AVAILABLE") MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-                shape = RoundedCornerShape(4.dp)
-            ) {
-                Text(
-                    text = cam.status,
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 10.sp
-                    ),
-                    color = if (cam.status == "AVAILABLE") MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                )
-            }
+    Row(modifier = Modifier.fillMaxWidth()) {
+        // Tree Graphics
+        if (isChild) {
+            Text(
+                text = if (isLastChild) " └── " else " ├── ",
+                style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
+        
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.weight(1f)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "${cam.friendlyName} — ID ${cam.id}",
+                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
+                    )
+                    Text(
+                        text = "${cam.mpClass}${if (cam.parentLogicalCameraId != null) " (Member of ${cam.parentLogicalCameraId})" else ""}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                Surface(
+                    color = if (cam.independentlyOpenable) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                    shape = RoundedCornerShape(4.dp)
+                ) {
+                    Text(
+                        text = if (cam.independentlyOpenable) "OPENABLE" else "HIDDEN",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 10.sp
+                        ),
+                        color = if (cam.independentlyOpenable) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
 
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -294,7 +360,9 @@ fun DiscoveredCameraItem(cam: DiscoveredCamera) {
             }
         }
     }
+    }
 }
+
 
 // -------------------------------------------------------------
 // LIVE CAMERA CARD
@@ -601,6 +669,13 @@ fun LiveCameraCard(
                     modifier = Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
+                    MetricRow(label = "Camera2 ID", value = liveStats.cameraId)
+                    MetricRow(label = "Logical Parent", value = liveStats.logicalCameraId ?: "N/A")
+                    MetricRow(label = "Physical ID", value = liveStats.physicalCameraId ?: "N/A")
+                    MetricRow(label = "Lens Facing", value = liveStats.lensFacing)
+                    MetricRow(label = "Hardware Level", value = liveStats.hardwareLevel)
+                    MetricRow(label = "RAW Capability", value = if (liveStats.hasRaw) "SUPPORTED" else "NOT SUPPORTED")
+                    MetricRow(label = "Configured FPS", value = liveStats.configuredFpsRange)
                     MetricRow(label = "Resolution", value = liveStats.resolution)
                     MetricRow(label = "Observed FPS", value = "${liveStats.observedFps} FPS")
                     MetricRow(label = "Frames", value = "%,d".format(liveStats.totalFrames))

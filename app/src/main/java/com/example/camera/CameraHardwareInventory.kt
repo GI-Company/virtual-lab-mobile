@@ -16,42 +16,52 @@ class CameraHardwareInventory(private val context: Context) {
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
 
     fun discoverCameras(): List<DiscoveredCamera> {
-        val discoveredList = mutableListOf<DiscoveredCamera>()
+        val discoveredMap = mutableMapOf<String, DiscoveredCamera>()
         try {
             val cameraIds = cameraManager.cameraIdList
             val concurrentCombinations = getConcurrentCameraCombinations()
 
+            // First pass: inspect all independently openable cameras
             for (id in cameraIds) {
                 try {
                     val chars = cameraManager.getCameraCharacteristics(id)
-                    val discovered = inspectCamera(id, chars, concurrentCombinations, null)
-                    discoveredList.add(discovered)
-
-                    // If logical multi-camera, also inspect physical cameras
-                    if (discovered.hasLogicalMulti) {
-                        for (physId in discovered.physicalCameraIds) {
-                            try {
-                                val physChars = cameraManager.getCameraCharacteristics(physId)
-                                val physCamera = inspectCamera(
-                                    id = physId,
-                                    chars = physChars,
-                                    concurrentGroups = concurrentCombinations,
-                                    parentLogicalId = id
-                                )
-                                discoveredList.add(physCamera)
-                            } catch (e: Exception) {
-                                Log.w(TAG, "Could not inspect physical camera $physId: ${e.message}")
-                            }
-                        }
-                    }
+                    val discovered = inspectCamera(id, chars, concurrentCombinations, null, independentlyOpenable = true)
+                    discoveredMap[id] = discovered
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed inspecting camera $id: ${e.message}")
                 }
             }
+
+            // Second pass: inspect physical cameras of logical cameras
+            val physicalCamerasToAdd = mutableMapOf<String, DiscoveredCamera>()
+            for (logicalCam in discoveredMap.values.filter { it.hasLogicalMulti }) {
+                for (physId in logicalCam.physicalCameraIds) {
+                    val independentlyOpenable = discoveredMap.containsKey(physId)
+                    try {
+                        val physChars = cameraManager.getCameraCharacteristics(physId)
+                        val physCamera = inspectCamera(
+                            id = physId,
+                            chars = physChars,
+                            concurrentGroups = concurrentCombinations,
+                            parentLogicalId = logicalCam.id,
+                            independentlyOpenable = independentlyOpenable
+                        )
+                        physicalCamerasToAdd[physId] = physCamera
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Could not inspect physical camera $physId: ${e.message}")
+                    }
+                }
+            }
+
+            // Merge the physical cameras (overwriting any independent version to include the parent info)
+            discoveredMap.putAll(physicalCamerasToAdd)
+
         } catch (e: Exception) {
             Log.e(TAG, "Failed retrieving camera ID list: ${e.message}", e)
         }
-        return discoveredList
+        
+        // Sort by ID naturally
+        return discoveredMap.values.sortedBy { it.id }
     }
 
     fun getConcurrentCameraCombinations(): List<ConcurrentCameraGroup> {
@@ -81,7 +91,8 @@ class CameraHardwareInventory(private val context: Context) {
         id: String,
         chars: CameraCharacteristics,
         concurrentGroups: List<ConcurrentCameraGroup>,
-        parentLogicalId: String?
+        parentLogicalId: String?,
+        independentlyOpenable: Boolean
     ): DiscoveredCamera {
         val facingInt = chars.get(CameraCharacteristics.LENS_FACING)
         val facing = when (facingInt) {
@@ -198,7 +209,8 @@ class CameraHardwareInventory(private val context: Context) {
             mpClass = mpClass,
             maxStreamResolution = maxStreamRes,
             status = status,
-            concurrencyStatus = concurrencyStatus
+            concurrencyStatus = concurrencyStatus,
+            independentlyOpenable = independentlyOpenable
         )
     }
 

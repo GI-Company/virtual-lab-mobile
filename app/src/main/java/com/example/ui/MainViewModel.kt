@@ -15,6 +15,7 @@ import com.example.camera.CameraMode
 import com.example.camera.CameraPermissionManager
 import com.example.camera.CameraPermissionState
 import com.example.camera.CameraWebSocketClient
+import com.example.camera.ControlWebSocketClient
 import com.example.camera.ConcurrentCameraGroup
 import com.example.camera.DeviceThermalMonitor
 import com.example.camera.DiscoveredCamera
@@ -36,6 +37,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.onEach
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -59,6 +61,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val cameraInventory = CameraHardwareInventory(application)
     val cameraAcquisition = CameraAcquisitionManager(application, cameraPermissionManager, thermalMonitor)
     val cameraWebSocketClient = CameraWebSocketClient()
+    val controlWebSocketClient = ControlWebSocketClient()
 
     val deviceMetadata: DeviceMetadata = identityManager.metadata
     val deviceId: String = identityManager.deviceId
@@ -135,12 +138,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val lastCapturedFrame: StateFlow<ScientificCapturedFrame?> = cameraAcquisition.lastCapturedFrame
     val cameraErrorMessage: StateFlow<String?> = cameraAcquisition.cameraErrorMessage
     val cameraWsLogs: StateFlow<List<String>> = cameraWebSocketClient.connectionLogs
+    val controlWsLogs: StateFlow<List<String>> = controlWebSocketClient.connectionLogs
 
     private val _cameraWsState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val cameraWsState: StateFlow<ConnectionState> = _cameraWsState.asStateFlow()
 
     private var connectionJob: Job? = null
     private var cameraWsJob: Job? = null
+    private var controlWsJob: Job? = null
     private var packetForwardJob: Job? = null
     private var cameraFrameForwardJob: Job? = null
 
@@ -248,6 +253,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _showLocalNetworkRestrictionWarning.value = false
                     // Also connect dedicated camera transport if camera streaming is active
                     connectCameraWsIfAppropriate(url)
+            connectControlWsIfAppropriate(url)
                 }
                 is ConnectionState.Error -> {
                     val isNearbyGranted = permissionManager.isNearbyWifiDevicesGranted()
@@ -278,6 +284,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun connectControlWsIfAppropriate(sensorUrl: String) {
+        controlWsJob?.cancel()
+        val controlUrl = sensorUrl.replace("/sensors", "/control")
+        controlWsJob = controlWebSocketClient.connect(controlUrl).onEach { state ->
+            Log.d("MainViewModel", "Control WS State: $state")
+        }.launchIn(viewModelScope)
+        
+        viewModelScope.launch {
+            controlWebSocketClient.incomingMessages.collect { msg ->
+                cameraAcquisition.processControlCommand(msg) { responseJson: String ->
+                    controlWebSocketClient.sendResponse(responseJson)
+                }
+            }
+        }
+    }
+
     private fun connectCameraWsIfAppropriate(sensorUrl: String) {
         val cameraUrl = deriveCameraWsUrl(sensorUrl)
         cameraWsJob?.cancel()
@@ -297,6 +319,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         cameraWsJob = null
         webSocketClient.disconnect()
         cameraWebSocketClient.disconnect()
+        controlWebSocketClient.disconnect()
         _connectionState.value = ConnectionState.Disconnected
         _cameraWsState.value = ConnectionState.Disconnected
         _connectedEndpoint.value = null
@@ -417,6 +440,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // If sensor websocket is connected, ensure camera ws transport is also connected
         _connectedEndpoint.value?.let { sensorUrl ->
             connectCameraWsIfAppropriate(sensorUrl)
+            connectControlWsIfAppropriate(sensorUrl)
         }
     }
 
