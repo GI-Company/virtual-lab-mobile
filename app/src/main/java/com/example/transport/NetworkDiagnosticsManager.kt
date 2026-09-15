@@ -6,6 +6,7 @@ import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.nsd.NsdManager
 import android.os.Build
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -20,12 +21,10 @@ data class NetworkDiagnostics(
     val isWifiConnected: Boolean = false,
     val localIp: String? = null,
     val gateway: String? = null,
-    val nearbyDevicesPermission: PermissionStatus = PermissionStatus.DENIED,
-    val localNetworkPermission: PermissionStatus = PermissionStatus.NOT_SUPPORTED,
-    val discoveredHost: String? = null,
-    val discoveredPort: Int? = null,
-    val txtProtocol: String? = null,
-    val txtPath: String? = null,
+    val nearbyWifiDevicesStatus: String = "GRANTED",
+    val accessLocalNetworkStatus: String = "NOT APPLICABLE (API 36)",
+    val isNsdAvailable: Boolean = true,
+    val resolvedVirtualLab: String? = null,
     val exactWsUrl: String? = null
 )
 
@@ -35,6 +34,9 @@ class NetworkDiagnosticsManager(
 ) {
     private val connectivityManager =
         context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+
+    private val nsdManager =
+        context.applicationContext.getSystemService(Context.NSD_SERVICE) as? NsdManager
 
     private val _diagnostics = MutableStateFlow(getCurrentDiagnostics())
     val diagnostics: StateFlow<NetworkDiagnostics> = _diagnostics.asStateFlow()
@@ -90,6 +92,26 @@ class NetworkDiagnosticsManager(
         update()
     }
 
+    fun updateManualUrl(url: String?) {
+        if (lastDiscovered == null && !url.isNullOrBlank()) {
+            val uriRegex = Regex("^ws://([^:/]+)(?::([0-9]+))?(.*)$")
+            val match = uriRegex.find(url)
+            if (match != null) {
+                val host = match.groupValues[1]
+                val port = match.groupValues[2].ifEmpty { "8765" }
+                val path = match.groupValues[3].ifEmpty { "/sensors" }
+                lastDiscovered = DiscoveredVirtualLab(
+                    serviceName = "VirtualLab (Manual)",
+                    hostAddress = host,
+                    port = port.toIntOrNull() ?: 8765,
+                    path = path,
+                    wsUrl = url
+                )
+            }
+        }
+        update()
+    }
+
     fun update() {
         _diagnostics.value = getCurrentDiagnostics()
     }
@@ -136,10 +158,11 @@ class NetworkDiagnosticsManager(
             } catch (_: Exception) {}
         }
 
-        val nearbyPerm = permissionManager.getNearbyWifiDevicesStatus()
-        val localNetPerm = permissionManager.getLocalNetworkPermissionStatus()
+        val nearbyPerm = permissionManager.getNearbyWifiDevicesStatusString()
+        val localNetPerm = permissionManager.getAccessLocalNetworkStatusString()
 
         val discovered = lastDiscovered
+        val resolvedLab = if (discovered != null) "${discovered.hostAddress}:${discovered.port}" else null
 
         return NetworkDiagnostics(
             androidVersion = Build.VERSION.RELEASE ?: "Unknown",
@@ -148,12 +171,10 @@ class NetworkDiagnosticsManager(
             isWifiConnected = isWifi,
             localIp = localIp,
             gateway = gateway,
-            nearbyDevicesPermission = nearbyPerm,
-            localNetworkPermission = localNetPerm,
-            discoveredHost = discovered?.hostAddress,
-            discoveredPort = discovered?.port,
-            txtProtocol = discovered?.protocol,
-            txtPath = discovered?.path,
+            nearbyWifiDevicesStatus = nearbyPerm,
+            accessLocalNetworkStatus = localNetPerm,
+            isNsdAvailable = (nsdManager != null),
+            resolvedVirtualLab = resolvedLab,
             exactWsUrl = discovered?.wsUrl
         )
     }

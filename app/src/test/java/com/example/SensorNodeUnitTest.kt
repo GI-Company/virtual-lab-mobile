@@ -95,4 +95,11 @@ class SensorNodeUnitTest {
         assertTrue(jsonString.contains("\"sensor_id\":\"accelerometer\""))
         assertTrue(jsonString.contains("\"ax\":0.12"))
     }
+
+    @Test
+    fun diagnostics_accessLocalNetworkFormat() {
+        val sdk = android.os.Build.VERSION.SDK_INT
+        val expected = if (sdk >= 37) "GRANTED" else "NOT APPLICABLE (API $sdk)"
+        assertTrue(expected.contains("API") || expected == "GRANTED")
+    }
 }

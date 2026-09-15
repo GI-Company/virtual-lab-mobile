@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Usb
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.*
@@ -64,6 +65,7 @@ fun SensorNodeApp(
     val sampleId by viewModel.sampleId.collectAsState()
     val isRecording by viewModel.isRecording.collectAsState()
     val streamedPacketsCount by viewModel.streamedPacketsCount.collectAsState()
+    val showLocalNetworkRestrictionWarning by viewModel.showLocalNetworkRestrictionWarning.collectAsState()
 
     val permissionsLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
@@ -131,10 +133,17 @@ fun SensorNodeApp(
         ) {
             // Permission Required Banner
             if (discoveryState is DiscoveryState.PermissionRequired ||
-                networkDiagnostics.nearbyDevicesPermission == PermissionStatus.DENIED
+                networkDiagnostics.nearbyWifiDevicesStatus == "DENIED"
             ) {
                 item {
                     PermissionRequiredBanner(onRequestAccess = requestPermissionsAction)
+                }
+            }
+
+            // ANDROID LOCAL NETWORK RESTRICTION
+            if (showLocalNetworkRestrictionWarning) {
+                item {
+                    LocalNetworkRestrictionCard(onDismiss = viewModel::dismissLocalNetworkRestrictionWarning)
                 }
             }
 
@@ -260,6 +269,73 @@ fun PermissionRequiredBanner(onRequestAccess: () -> Unit) {
 }
 
 // -------------------------------------------------------------
+// ANDROID LOCAL NETWORK RESTRICTION CARD
+// -------------------------------------------------------------
+@Composable
+fun LocalNetworkRestrictionCard(onDismiss: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "ANDROID LOCAL NETWORK RESTRICTION",
+                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                }
+                IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Dismiss",
+                        tint = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                }
+            }
+
+            Text(
+                "Local-network permission is granted, but direct LAN traffic is being blocked by the operating system.\n\nFor Android 16 development builds, Local Network Protection compatibility testing may be enabled.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onErrorContainer
+            )
+
+            Surface(
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
+                shape = MaterialTheme.shapes.small,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "adb shell am compat disable RESTRICT_LOCAL_NETWORK com.aistudio.sensornode.vlsnxz",
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp
+                    ),
+                    modifier = Modifier.padding(8.dp)
+                )
+            }
+        }
+    }
+}
+
+// -------------------------------------------------------------
 // NETWORK CARD
 // -------------------------------------------------------------
 @Composable
@@ -299,21 +375,8 @@ fun NetworkCard(
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 
-            MetricRow(label = "Wi-Fi", value = if (diagnostics.isWifiConnected) "CONNECTED" else "DISCONNECTED")
-            MetricRow(label = "Device IP", value = diagnostics.localIp ?: "UNAVAILABLE")
-            MetricRow(label = "Gateway", value = diagnostics.gateway ?: "UNAVAILABLE")
-
-            val permLabel = when (diagnostics.nearbyDevicesPermission) {
-                PermissionStatus.GRANTED -> "GRANTED"
-                PermissionStatus.DENIED -> "PERMISSION REQUIRED"
-                PermissionStatus.NOT_REQUIRED -> "NOT REQUIRED"
-                PermissionStatus.NOT_SUPPORTED -> "NOT SUPPORTED"
-            }
-            val permColor = when (diagnostics.nearbyDevicesPermission) {
-                PermissionStatus.GRANTED -> MaterialTheme.colorScheme.primary
-                PermissionStatus.DENIED -> MaterialTheme.colorScheme.error
-                else -> MaterialTheme.colorScheme.onSurfaceVariant
-            }
+            MetricRow(label = "Android", value = "${diagnostics.androidVersion} / API ${diagnostics.sdkLevel}")
+            MetricRow(label = "Target SDK", value = "${diagnostics.targetSdk}")
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -321,11 +384,11 @@ fun NetworkCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "LAN Permission",
+                    text = "NEARBY_WIFI_DEVICES",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                if (diagnostics.nearbyDevicesPermission == PermissionStatus.DENIED) {
+                if (diagnostics.nearbyWifiDevicesStatus == "DENIED") {
                     TextButton(
                         onClick = onRequestAccess,
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
@@ -334,15 +397,23 @@ fun NetworkCard(
                     }
                 } else {
                     Text(
-                        text = permLabel,
+                        text = diagnostics.nearbyWifiDevicesStatus,
                         style = MaterialTheme.typography.bodyMedium.copy(
                             fontWeight = FontWeight.Bold,
                             fontFamily = FontFamily.Monospace
                         ),
-                        color = permColor
+                        color = if (diagnostics.nearbyWifiDevicesStatus == "GRANTED") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
+
+            MetricRow(label = "ACCESS_LOCAL_NETWORK", value = diagnostics.accessLocalNetworkStatus)
+            MetricRow(label = "NSD Discovery", value = if (diagnostics.isNsdAvailable) "AVAILABLE" else "UNAVAILABLE")
+            MetricRow(label = "Wi-Fi", value = if (diagnostics.isWifiConnected) "CONNECTED" else "DISCONNECTED")
+            MetricRow(label = "Device IP", value = diagnostics.localIp ?: "UNAVAILABLE")
+            MetricRow(label = "Gateway", value = diagnostics.gateway ?: "UNAVAILABLE")
+            MetricRow(label = "Resolved VirtualLab", value = diagnostics.resolvedVirtualLab ?: "NONE")
+            MetricRow(label = "WebSocket URL", value = diagnostics.exactWsUrl ?: "NONE")
         }
     }
 }
@@ -1164,19 +1235,16 @@ fun AdvancedCard(
                         "ANDROID / NETWORK DIAGNOSTICS",
                         style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
                     )
-                    DiagnosticItem("Android version", diagnostics.androidVersion)
-                    DiagnosticItem("SDK level", "${diagnostics.sdkLevel}")
+                    DiagnosticItem("Android", "${diagnostics.androidVersion} / API ${diagnostics.sdkLevel}")
                     DiagnosticItem("Target SDK", "${diagnostics.targetSdk}")
+                    DiagnosticItem("NEARBY_WIFI_DEVICES", diagnostics.nearbyWifiDevicesStatus)
+                    DiagnosticItem("ACCESS_LOCAL_NETWORK", diagnostics.accessLocalNetworkStatus)
+                    DiagnosticItem("NSD Discovery", if (diagnostics.isNsdAvailable) "AVAILABLE" else "UNAVAILABLE")
                     DiagnosticItem("Wi-Fi state", if (diagnostics.isWifiConnected) "CONNECTED" else "DISCONNECTED")
                     DiagnosticItem("Device IP", diagnostics.localIp ?: "UNAVAILABLE")
                     DiagnosticItem("Gateway", diagnostics.gateway ?: "UNAVAILABLE")
-                    DiagnosticItem("Nearby Devices permission", diagnostics.nearbyDevicesPermission.name)
-                    DiagnosticItem("Local Network permission", diagnostics.localNetworkPermission.name)
-                    DiagnosticItem("Discovered VirtualLab host", diagnostics.discoveredHost ?: "NONE")
-                    DiagnosticItem("Discovered VirtualLab port", diagnostics.discoveredPort?.toString() ?: "NONE")
-                    DiagnosticItem("TXT protocol_version", diagnostics.txtProtocol ?: "NONE")
-                    DiagnosticItem("TXT path", diagnostics.txtPath ?: "NONE")
-                    DiagnosticItem("Exact WebSocket URL", diagnostics.exactWsUrl ?: "NONE")
+                    DiagnosticItem("Resolved VirtualLab", diagnostics.resolvedVirtualLab ?: "NONE")
+                    DiagnosticItem("WebSocket URL", diagnostics.exactWsUrl ?: "NONE")
 
                     HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 

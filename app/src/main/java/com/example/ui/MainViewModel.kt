@@ -53,6 +53,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _connectedEndpoint = MutableStateFlow<String?>(null)
     val connectedEndpoint: StateFlow<String?> = _connectedEndpoint.asStateFlow()
 
+    private val _showLocalNetworkRestrictionWarning = MutableStateFlow(false)
+    val showLocalNetworkRestrictionWarning: StateFlow<Boolean> = _showLocalNetworkRestrictionWarning.asStateFlow()
+
     val discoveredSensors: Map<SensorTypeClass, DiscoveredSensorMeta> = sensorManager.discoveredSensors
     val liveReadings: StateFlow<Map<SensorTypeClass, LiveSensorReading>> = sensorManager.liveReadings
 
@@ -164,12 +167,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun connect(url: String, discoveredLab: DiscoveredVirtualLab? = null) {
         connectionJob?.cancel()
         _connectedEndpoint.value = url
-        networkDiagnosticsManager.updateDiscoveredService(discoveredLab)
+        if (discoveredLab != null) {
+            networkDiagnosticsManager.updateDiscoveredService(discoveredLab)
+        } else {
+            networkDiagnosticsManager.updateManualUrl(url)
+        }
 
         connectionJob = webSocketClient.connect(url).onEach { state ->
             _connectionState.value = state
+            when (state) {
+                is ConnectionState.Connected -> {
+                    _showLocalNetworkRestrictionWarning.value = false
+                }
+                is ConnectionState.Error -> {
+                    val isNearbyGranted = permissionManager.isNearbyWifiDevicesGranted()
+                    val isLanTarget = !isUsbDevelopmentUrl(url)
+                    val errorLower = state.message.lowercase()
+                    val isTimeoutOrUnreachable = errorLower.contains("timeout") ||
+                            errorLower.contains("timed out") ||
+                            errorLower.contains("failed to connect") ||
+                            errorLower.contains("unreach") ||
+                            state.throwable is java.net.SocketTimeoutException ||
+                            state.throwable is java.net.ConnectException
+
+                    if (isNearbyGranted && isLanTarget && isTimeoutOrUnreachable) {
+                        _showLocalNetworkRestrictionWarning.value = true
+                    }
+                }
+                else -> {}
+            }
             networkDiagnosticsManager.update()
         }.launchIn(viewModelScope)
+    }
+
+    fun dismissLocalNetworkRestrictionWarning() {
+        _showLocalNetworkRestrictionWarning.value = false
     }
 
     fun disconnect() {

@@ -64,43 +64,46 @@ class WebSocketClient {
             Request.Builder().url(url).build()
         } catch (e: Exception) {
             val errorMsg = "Invalid WebSocket URL: ${e.message}"
-            appendLog("[ERROR] $errorMsg")
+            appendLog("[FAILURE] $errorMsg")
             trySend(ConnectionState.Error(errorMsg, e))
             close()
             return@callbackFlow
         }
 
-        // PHASE A: Immediately before OkHttp newWebSocket(), log:
-        // CONNECTING TO: ws://<resolved-host>:<resolved-port>/<resolved-path>
-        appendLog("CONNECTING TO: $url")
+        // OkHttp Lifecycle: CONNECTING
+        appendLog("[CONNECTING] $url")
         Log.d(TAG, "CONNECTING TO: $url")
 
         trySend(ConnectionState.Connecting)
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                appendLog("onOpen: Connected (HTTP ${response.code} ${response.message})")
+                // OkHttp Lifecycle: OPEN
+                appendLog("[OPEN] Connected to $url (HTTP ${response.code} ${response.message})")
                 trySend(ConnectionState.Connected)
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                // Incoming message handling
+                // Incoming application data
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                appendLog("onClosing: code=$code, reason='$reason'")
+                // OkHttp Lifecycle: CLOSING
+                appendLog("[CLOSING] code=$code, reason='$reason'")
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                appendLog("onClosed: code=$code, reason='$reason'")
+                // OkHttp Lifecycle: CLOSED
+                appendLog("[CLOSED] code=$code, reason='$reason'")
                 trySend(ConnectionState.Disconnected)
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                // OkHttp Lifecycle: FAILURE
                 val respInfo = if (response != null) " (HTTP ${response.code})" else ""
                 val errorMsg = "${t.javaClass.simpleName}: ${t.message ?: "Connection failure"}$respInfo"
-                appendLog("onFailure: $errorMsg")
-                Log.e(TAG, "onFailure: $errorMsg", t)
+                appendLog("[FAILURE] $errorMsg")
+                Log.e(TAG, "[FAILURE] $errorMsg", t)
                 trySend(ConnectionState.Error(errorMsg, t))
             }
         })
@@ -118,11 +121,12 @@ class WebSocketClient {
     }
 
     fun disconnect() {
-        appendLog("disconnect requested by user")
+        appendLog("[CLOSING] Disconnect requested by user")
         try {
             webSocket?.close(1000, "Disconnected by user")
         } catch (_: Exception) {}
         webSocket = null
+        appendLog("[CLOSED] Disconnected")
     }
 
     fun clearLogs() {
