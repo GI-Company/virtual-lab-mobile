@@ -65,6 +65,8 @@ fun SensorNodeApp(
 
     val connectionState by viewModel.connectionState.collectAsState()
     val connectedEndpoint by viewModel.connectedEndpoint.collectAsState()
+    val transportMode by viewModel.transportMode.collectAsState()
+    val usbBaseUrl by viewModel.usbBaseUrl.collectAsState()
     val discoveryState by viewModel.discoveryState.collectAsState()
     val networkDiagnostics by viewModel.networkDiagnostics.collectAsState()
     val connectionLogs by viewModel.connectionLogs.collectAsState()
@@ -204,7 +206,8 @@ fun SensorNodeApp(
                     cameraWsState = cameraWsState,
                     controlWsState = controlWsState,
                     connectedEndpoint = connectedEndpoint,
-                    isUsbDevMode = viewModel.isUsbDevelopmentUrl(connectedEndpoint),
+                    transportMode = transportMode,
+                    usbBaseUrl = usbBaseUrl,
                     onConnect = { device ->
                         viewModel.connect(device.wsUrl, device)
                     },
@@ -517,7 +520,8 @@ fun VirtualLabCard(
     cameraWsState: ConnectionState,
     controlWsState: ConnectionState,
     connectedEndpoint: String?,
-    isUsbDevMode: Boolean,
+    transportMode: com.example.ui.TransportMode,
+    usbBaseUrl: String?,
     onConnect: (DiscoveredVirtualLab) -> Unit,
     onDisconnect: () -> Unit,
     onRetrySearch: () -> Unit,
@@ -578,12 +582,36 @@ fun VirtualLabCard(
                 }
             }
 
-            // USB Dev mode notice if active
-            if (isUsbDevMode && connectionState is ConnectionState.Connected) {
+
+            // TRANSPORT MODE HEADER
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "TRANSPORT MODE:",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f)
+                )
+                Surface(
+                    color = MaterialTheme.colorScheme.secondaryContainer,
+                    shape = RoundedCornerShape(4.dp)
+                ) {
+                    Text(
+                        text = if (transportMode == com.example.ui.TransportMode.USB_ADB) "USB DEVELOPMENT" else "LAN",
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                }
+            }
+
+            if (transportMode == com.example.ui.TransportMode.USB_ADB) {
                 Surface(
                     color = MaterialTheme.colorScheme.tertiaryContainer,
                     shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
                 ) {
                     Row(
                         modifier = Modifier.padding(10.dp),
@@ -597,12 +625,12 @@ fun VirtualLabCard(
                         Spacer(Modifier.width(8.dp))
                         Column {
                             Text(
-                                "USB / LOCAL DEVELOPMENT CONNECTION",
+                                "Base endpoint:",
                                 style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
                                 color = MaterialTheme.colorScheme.onTertiaryContainer
                             )
                             Text(
-                                "Connected via ADB reverse tunnel. Localhost loopback link active.",
+                                "${usbBaseUrl ?: "ws://127.0.0.1:8765"}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.8f)
                             )
@@ -638,7 +666,7 @@ fun VirtualLabCard(
                         }
                     }
                 }
-            } else {
+            } else if (transportMode != com.example.ui.TransportMode.USB_ADB) {
                 // Show discovery results
                 when (discoveryState) {
                     is DiscoveryState.Searching, is DiscoveryState.Idle -> {
@@ -723,15 +751,40 @@ fun VirtualLabCard(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error
                         )
-                        Button(onClick = onRetrySearch) {
+                                                Button(onClick = onRetrySearch) {
                             Text("Retry Search")
                         }
+                    }
+                }
+            } else {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                    shape = MaterialTheme.shapes.medium,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            "USB Development Session Offline",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Ensure `adb reverse tcp:8765 tcp:8765` is running and the Desktop is listening.",
+                            style = MaterialTheme.typography.bodySmall,
+                            textAlign = TextAlign.Center,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }
         }
     }
 }
+
 @Composable
 fun DiscoveredDeviceCard(
     device: DiscoveredVirtualLab,
@@ -908,7 +961,6 @@ fun SensorsCard(discoveredSensors: Map<SensorTypeClass, DiscoveredSensorMeta>) {
         }
     }
 }
-
 // -------------------------------------------------------------
 // LIVE CARD
 // -------------------------------------------------------------

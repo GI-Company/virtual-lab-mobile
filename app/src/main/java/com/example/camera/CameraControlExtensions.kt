@@ -12,7 +12,8 @@ fun CameraCharacteristics.getCameraCapabilitiesPayload(): CameraCapabilitiesPayl
     val awbModes = get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES) ?: IntArray(0)
     
     val hwLevel = get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL) ?: CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY
-    val manualSensor = hwLevel == CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_FULL || hwLevel == CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_3
+    val capabilities = get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: IntArray(0)
+    val manualSensor = capabilities.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)
     
     val minFocusDist = get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)
     val manualFocus = minFocusDist != null && minFocusDist > 0f
@@ -37,9 +38,8 @@ fun CameraCharacteristics.getCameraCapabilitiesPayload(): CameraCapabilitiesPayl
     
     val flashInfo = get(CameraCharacteristics.FLASH_INFO_AVAILABLE) ?: false
     
-    val capabilities = get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: IntArray(0)
     val rawSupported = capabilities.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)
-    val yuvSupported = capabilities.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_YUV_REPROCESSING)
+    val yuvSupported = streamMap?.getOutputSizes(android.graphics.ImageFormat.YUV_420_888)?.isNotEmpty() == true
 
     val afModeList = afModes.map {
         when (it) {

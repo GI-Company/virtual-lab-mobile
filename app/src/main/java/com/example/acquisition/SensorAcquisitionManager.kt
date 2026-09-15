@@ -141,6 +141,15 @@ class SensorAcquisitionManager(private val context: Context) {
 
     private val activeListeners = ConcurrentHashMap<SensorTypeClass, SensorEventListener>()
 
+    data class SensorStreamState(
+        var isStreamingPackets: Boolean = false,
+        var deviceId: String = "",
+        var sessionId: String = ""
+    )
+
+    private val streamStates = ConcurrentHashMap<SensorTypeClass, SensorStreamState>()
+
+
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
         timeZone = TimeZone.getTimeZone("UTC")
     }
@@ -185,7 +194,7 @@ class SensorAcquisitionManager(private val context: Context) {
      */
     fun startLivePreview(sensorClass: SensorTypeClass) {
         if (!isSensorAvailable(sensorClass)) return
-        registerListener(sensorClass, isStreamingPackets = false, deviceId = "", sessionId = "")
+        registerListener(sensorClass)
     }
 
     /**
@@ -206,21 +215,26 @@ class SensorAcquisitionManager(private val context: Context) {
         for (sensorClass in selectedSensors) {
             if (isSensorAvailable(sensorClass)) {
                 sequenceNumbers.putIfAbsent(sensorClass, AtomicLong(0L))
-                registerListener(
-                    sensorClass,
-                    isStreamingPackets = true,
-                    deviceId = deviceId,
-                    sessionId = sessionId
-                )
+                streamStates.getOrPut(sensorClass) { SensorStreamState() }.apply {
+                    this.isStreamingPackets = true
+                    this.deviceId = deviceId
+                    this.sessionId = sessionId
+                }
+                registerListener(sensorClass)
             }
         }
     }
 
+    fun stopCapture(sensors: Set<SensorTypeClass>) {
+        for (sensor in sensors) {
+            streamStates[sensor]?.isStreamingPackets = false
+        }
+    }
+
     fun stopCapture() {
-        // Unregister all listeners
-        val keys = activeListeners.keys.toList()
+        val keys = streamStates.keys.toList()
         for (key in keys) {
-            unregisterListener(key)
+            streamStates[key]?.isStreamingPackets = false
         }
     }
 
@@ -229,10 +243,7 @@ class SensorAcquisitionManager(private val context: Context) {
     }
 
     private fun registerListener(
-        sensorClass: SensorTypeClass,
-        isStreamingPackets: Boolean,
-        deviceId: String,
-        sessionId: String
+        sensorClass: SensorTypeClass
     ) {
         if (activeListeners.containsKey(sensorClass)) {
             // Already registered
@@ -266,13 +277,14 @@ class SensorAcquisitionManager(private val context: Context) {
                 _liveReadings.value = updatedMap
 
                 // If streaming is enabled, construct and emit packet
-                if (isStreamingPackets) {
+                val state = streamStates[sensorClass]
+                if (state?.isStreamingPackets == true) {
                     val seq = sequenceNumbers.getOrPut(sensorClass) { AtomicLong(0L) }.incrementAndGet()
                     val packet = createPacket(
                         sensorClass = sensorClass,
                         event = event,
-                        deviceId = deviceId,
-                        sessionId = sessionId,
+                        deviceId = state.deviceId,
+                        sessionId = state.sessionId,
                         sequence = seq
                     )
                     _packetStream.tryEmit(packet)

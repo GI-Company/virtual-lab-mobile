@@ -1,0 +1,44 @@
+import re
+
+with open('./app/src/main/java/com/example/ui/SensorNodeApp.kt', 'r') as f:
+    content = f.read()
+
+replacement = """                        Button(onClick = onRetrySearch) {
+                            Text("Retry Search")
+                        }
+                    }
+                }
+            } else {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                    shape = MaterialTheme.shapes.medium,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            "USB Development Session Offline",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Ensure `adb reverse tcp:8765 tcp:8765` is running and the Desktop is listening.",
+                            style = MaterialTheme.typography.bodySmall,
+                            textAlign = TextAlign.Center,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+"""
+
+content = re.sub(r'Button\(onClick = onRetrySearch\) \{\s*Text\("Retry Search"\)\s*\}\s*\}\s*\}\s*\}\s*\}\s*\}', replacement, content)
+
+with open('./app/src/main/java/com/example/ui/SensorNodeApp.kt', 'w') as f:
+    f.write(content)

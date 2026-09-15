@@ -3,6 +3,7 @@ package com.example.camera
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
+@Serializable
 enum class CameraFacing {
     BACK,
     FRONT,
@@ -55,6 +56,7 @@ data class CameraFrameMetadata(
     @SerialName("capture_id") val captureId: String? = null
 )
 
+@Serializable
 data class DiscoveredCamera(
     val id: String,
     val isLogical: Boolean,
@@ -80,6 +82,7 @@ data class DiscoveredCamera(
     val independentlyOpenable: Boolean = true
 )
 
+@Serializable
 data class ConcurrentCameraGroup(
     val cameraIds: List<String>,
     val description: String,
@@ -210,4 +213,21 @@ data class CameraStateResponse(
     @SerialName("device_id") val deviceId: String,
     @SerialName("camera_id") val cameraId: String,
     @SerialName("state") val state: ControlParameters
+)
+
+@Serializable
+data class ChannelHelloMessage(
+    @SerialName("schema_version") val schemaVersion: String = "1",
+    @SerialName("message_type") val messageType: String = "CHANNEL_HELLO",
+    @SerialName("device_id") val deviceId: String,
+    val channel: String
+)
+
+@Serializable
+data class CameraInventoryResponse(
+    @SerialName("schema_version") val schemaVersion: String = "1",
+    @SerialName("message_type") val messageType: String = "CAMERA_INVENTORY",
+    @SerialName("request_id") val requestId: String,
+    @SerialName("device_id") val deviceId: String,
+    @SerialName("cameras") val cameras: List<DiscoveredCamera>
 )

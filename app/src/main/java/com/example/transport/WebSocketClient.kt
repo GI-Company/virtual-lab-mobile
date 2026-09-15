@@ -54,7 +54,7 @@ class WebSocketClient {
         _connectionLogs.value = current
     }
 
-    fun connect(url: String): Flow<ConnectionState> = callbackFlow {
+    fun connect(url: String, helloJson: String? = null): Flow<ConnectionState> = callbackFlow {
         try {
             webSocket?.close(1000, "Reconnecting")
         } catch (_: Exception) {}
@@ -80,6 +80,9 @@ class WebSocketClient {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 // OkHttp Lifecycle: OPEN
                 appendLog("[OPEN] Connected to $url (HTTP ${response.code} ${response.message})")
+                if (helloJson != null) {
+                    webSocket.send(helloJson)
+                }
                 trySend(ConnectionState.Connected)
             }
 

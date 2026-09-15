@@ -1,4 +1,9 @@
-package com.example
+import re
+
+with open('./app/src/main/java/com/example/MainActivity.kt', 'r') as f:
+    content = f.read()
+
+new_content = """package com.example
 
 import android.content.Intent
 import android.os.Bundle
@@ -41,3 +46,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
+"""
+
+with open('./app/src/main/java/com/example/MainActivity.kt', 'w') as f:
+    f.write(new_content)

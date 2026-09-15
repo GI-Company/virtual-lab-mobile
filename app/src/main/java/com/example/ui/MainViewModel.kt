@@ -25,6 +25,7 @@ import com.example.identity.DeviceIdentityManager
 import com.example.identity.DeviceMetadata
 import com.example.session.MeasurementPacket
 import com.example.transport.ConnectionState
+import com.example.camera.ChannelHelloMessage
 import com.example.transport.DiscoveredVirtualLab
 import com.example.transport.DiscoveryState
 import com.example.transport.LocalNetworkPermissionManager
@@ -41,6 +42,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.onEach
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+
+enum class TransportMode { LAN, USB_ADB }
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
@@ -59,12 +62,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val cameraPermissionManager = CameraPermissionManager(application)
     val thermalMonitor = DeviceThermalMonitor(application)
     val cameraInventory = CameraHardwareInventory(application)
-    val cameraAcquisition = CameraAcquisitionManager(application, cameraPermissionManager, thermalMonitor)
+    val cameraAcquisition = CameraAcquisitionManager(application, cameraPermissionManager, thermalMonitor, cameraInventory)
     val cameraWebSocketClient = CameraWebSocketClient()
     val controlWebSocketClient = ControlWebSocketClient()
 
     val deviceMetadata: DeviceMetadata = identityManager.metadata
     val deviceId: String = identityManager.deviceId
+
+    // Transport Mode
+    private val _transportMode = MutableStateFlow(TransportMode.LAN)
+    val transportMode: StateFlow<TransportMode> = _transportMode.asStateFlow()
+
+    private val _usbBaseUrl = MutableStateFlow<String?>("ws://127.0.0.1:8765")
+    val usbBaseUrl: StateFlow<String?> = _usbBaseUrl.asStateFlow()
+
+    fun setTransportModeFromIntent(modeStr: String?, baseUrl: String?) {
+        val newMode = try {
+            if (modeStr != null) TransportMode.valueOf(modeStr) else TransportMode.LAN
+        } catch (e: Exception) {
+            TransportMode.LAN
+        }
+        
+        if (newMode == TransportMode.USB_ADB) {
+            if (baseUrl != null && (baseUrl.startsWith("ws://") || baseUrl.startsWith("wss://"))) {
+                _usbBaseUrl.value = baseUrl
+            } else {
+                _usbBaseUrl.value = "ws://127.0.0.1:8765"
+            }
+        }
+        
+        if (_transportMode.value != newMode || newMode == TransportMode.USB_ADB) {
+            _transportMode.value = newMode
+            disconnect()
+            
+            if (newMode == TransportMode.USB_ADB) {
+                _usbBaseUrl.value?.let { connect(it) }
+            }
+        }
+    }
 
     // Network & Discovery State
     val discoveryState: StateFlow<DiscoveryState> = discoveryManager.discoveryState
@@ -162,11 +197,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (cameraPermissionManager.isCameraPermissionGranted()) {
             refreshCameraInventory()
         }
+
+        viewModelScope.launch {
+            controlWebSocketClient.incomingMessages.collect { msg ->
+                if (msg.deviceId != deviceId) {
+                    controlWebSocketClient.sendResponse(Json.encodeToString(com.example.camera.CameraControlResult(
+                        requestId = msg.requestId,
+                        status = "REJECTED",
+                        errorReason = "DEVICE_ID_MISMATCH"
+                    )))
+                    return@collect
+                }
+                cameraAcquisition.processControlCommand(msg) { responseJson: String ->
+                    controlWebSocketClient.sendResponse(responseJson)
+                }
+            }
+        }
     }
 
     private fun setupPacketForwarding() {
         packetForwardJob = sensorManager.packetStream.onEach { packet ->
-            if (_isRecording.value && _connectionState.value == ConnectionState.Connected) {
+            if (_connectionState.value is ConnectionState.Connected) {
                 try {
                     val json = Json.encodeToString(packet)
                     val sent = webSocketClient.send(json)
@@ -183,7 +234,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun setupCameraFrameForwarding() {
         cameraFrameForwardJob = cameraAcquisition.frameFlow.onEach { (meta, bytes) ->
             if (cameraWebSocketClient.isConnected()) {
-                cameraWebSocketClient.sendBinaryFrame(meta, bytes)
+                val sent = cameraWebSocketClient.sendBinaryFrame(meta, bytes)
+                if (!sent && meta.messageType == "CAMERA_PREVIEW_FRAME") {
+                    cameraAcquisition.incrementDroppedFrames()
+                }
             }
         }.launchIn(viewModelScope)
     }
@@ -221,12 +275,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun toggleCaptureSensor(sensorClass: SensorTypeClass) {
-        if (!sensorManager.isSensorAvailable(sensorClass)) return
         val current = _selectedCaptureSensors.value.toMutableSet()
         if (current.contains(sensorClass)) {
             current.remove(sensorClass)
+            sensorManager.stopCapture(setOf(sensorClass))
         } else {
             current.add(sensorClass)
+            if (_connectionState.value is ConnectionState.Connected) {
+                sensorManager.startCapture(setOf(sensorClass), deviceId, _sessionId.value)
+            }
         }
         _selectedCaptureSensors.value = current
     }
@@ -241,19 +298,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // WebSocket / Connection
     fun connect(url: String, discoveredLab: DiscoveredVirtualLab? = null) {
+        val baseUrl = getBaseUrl(url)
+        val sensorUrl = "$baseUrl/sensors"
+        
         connectionJob?.cancel()
-        _connectedEndpoint.value = url
+        _connectedEndpoint.value = sensorUrl
         if (discoveredLab != null) {
             networkDiagnosticsManager.updateDiscoveredService(discoveredLab)
         } else {
             networkDiagnosticsManager.updateManualUrl(url)
         }
 
-        connectionJob = webSocketClient.connect(url).onEach { state ->
+        val sensorsHello = Json.encodeToString(ChannelHelloMessage(deviceId = deviceId, channel = "sensors"))
+        connectionJob = webSocketClient.connect(sensorUrl, sensorsHello).onEach { state ->
             _connectionState.value = state
             when (state) {
                 is ConnectionState.Connected -> {
                     _showLocalNetworkRestrictionWarning.value = false
+                    sensorManager.startCapture(_selectedCaptureSensors.value, deviceId, _sessionId.value)
                 }
                 is ConnectionState.Error -> {
                     val isNearbyGranted = permissionManager.isNearbyWifiDevicesGranted()
@@ -279,37 +341,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         connectControlWsIfAppropriate(url)
     }
 
-    private fun deriveCameraWsUrl(sensorWsUrl: String): String {
-        return if (sensorWsUrl.contains("/sensors")) {
-            sensorWsUrl.replace("/sensors", "/camera")
-        } else {
-            sensorWsUrl.trimEnd('/') + "/camera"
-        }
+
+    private fun getBaseUrl(rawUrl: String): String {
+        var base = rawUrl.trimEnd('/')
+        if (base.endsWith("/sensors")) base = base.removeSuffix("/sensors")
+        if (base.endsWith("/camera")) base = base.removeSuffix("/camera")
+        if (base.endsWith("/control")) base = base.removeSuffix("/control")
+        return base
     }
+
 
     private fun connectControlWsIfAppropriate(sensorUrl: String) {
         if (_controlWsState.value is ConnectionState.Connected || _controlWsState.value is ConnectionState.Connecting) return
         controlWsJob?.cancel()
-        val controlUrl = sensorUrl.replace("/sensors", "/control")
-        controlWsJob = controlWebSocketClient.connect(controlUrl).onEach { state ->
+        val controlUrl = "${getBaseUrl(sensorUrl)}/control"
+        val controlHello = Json.encodeToString(ChannelHelloMessage(deviceId = deviceId, channel = "control"))
+        controlWsJob = controlWebSocketClient.connect(controlUrl, controlHello).onEach { state ->
             _controlWsState.value = state
             Log.d("MainViewModel", "Control WS State: $state")
         }.launchIn(viewModelScope)
-        
-        viewModelScope.launch {
-            controlWebSocketClient.incomingMessages.collect { msg ->
-                cameraAcquisition.processControlCommand(msg) { responseJson: String ->
-                    controlWebSocketClient.sendResponse(responseJson)
-                }
-            }
-        }
     }
 
     private fun connectCameraWsIfAppropriate(sensorUrl: String) {
         if (_cameraWsState.value is ConnectionState.Connected || _cameraWsState.value is ConnectionState.Connecting) return
-        val cameraUrl = deriveCameraWsUrl(sensorUrl)
+        val cameraUrl = "${getBaseUrl(sensorUrl)}/camera"
         cameraWsJob?.cancel()
-        cameraWsJob = cameraWebSocketClient.connect(cameraUrl).onEach { state ->
+        val cameraHello = Json.encodeToString(ChannelHelloMessage(deviceId = deviceId, channel = "camera"))
+        cameraWsJob = cameraWebSocketClient.connect(cameraUrl, cameraHello).onEach { state ->
             _cameraWsState.value = state
         }.launchIn(viewModelScope)
     }
@@ -416,34 +474,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startCameraStream() {
-        val camera = _selectedCamera.value ?: run {
-            cameraAcquisition.startCameraStream(
-                DiscoveredCamera(
-                    id = "0",
-                    isLogical = false,
-                    physicalCameraIds = emptyList(),
-                    lensFacing = com.example.camera.CameraFacing.BACK,
-                    focalLengths = emptyList(),
-                    sensorPhysicalSizeMm = null,
-                    pixelArraySize = null,
-                    activeArraySize = null,
-                    timestampSource = "UNKNOWN",
-                    hardwareLevel = "UNKNOWN",
-                    capabilities = emptyList(),
-                    hasRaw = false,
-                    hasLogicalMulti = false,
-                    supportedResolutions = emptyList(),
-                    supportedFpsRanges = emptyList(),
-                    friendlyName = "Rear Camera",
-                    mpClass = "Unknown MP",
-                    maxStreamResolution = "1280x720",
-                    status = "AVAILABLE",
-                    concurrencyStatus = "INDIVIDUALLY STREAMABLE"
-                ),
-                deviceId
-            )
+        val camera = _selectedCamera.value
+        if (camera == null) {
+            Log.e(TAG, "CAMERA_UNAVAILABLE: No camera selected")
             return
         }
+
         cameraAcquisition.startCameraStream(camera, deviceId)
 
         // If sensor websocket is connected, ensure camera ws transport is also connected
@@ -458,7 +494,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun captureScientificFrame() {
-        cameraAcquisition.captureScientificFrame()
+        viewModelScope.launch {
+            cameraAcquisition.captureScientificFrame("MANUAL-" + java.util.UUID.randomUUID().toString().take(6)) {}
+        }
     }
 
     fun dismissCameraError() {

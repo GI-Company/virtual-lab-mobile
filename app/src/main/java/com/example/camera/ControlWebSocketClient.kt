@@ -36,6 +36,7 @@ class ControlWebSocketClient {
         .build()
 
     private var webSocket: WebSocket? = null
+    private var isOpen: Boolean = false
     
     private val _connectionLogs = MutableStateFlow<List<String>>(emptyList())
     val connectionLogs: StateFlow<List<String>> = _connectionLogs.asStateFlow()
@@ -57,11 +58,12 @@ class ControlWebSocketClient {
         _connectionLogs.value = current
     }
 
-    fun connect(controlUrl: String): Flow<ConnectionState> = callbackFlow {
+    fun connect(controlUrl: String, helloJson: String? = null): Flow<ConnectionState> = callbackFlow {
         try {
             webSocket?.close(1000, "Reconnecting")
         } catch (_: Exception) {}
         webSocket = null
+        isOpen = false
 
         val request = try {
             Request.Builder().url(controlUrl).build()
@@ -79,7 +81,12 @@ class ControlWebSocketClient {
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                appendLog("[OPEN] Control stream connected to $controlUrl (HTTP ${response.code})")
+                isOpen = true
+                // OkHttp Lifecycle: OPEN
+                appendLog("[OPEN] Connected to $controlUrl (HTTP ${response.code} ${response.message})")
+                if (helloJson != null) {
+                    webSocket.send(helloJson)
+                }
                 trySend(ConnectionState.Connected)
             }
 
@@ -93,15 +100,18 @@ class ControlWebSocketClient {
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                isOpen = false
                 appendLog("[CLOSING] code=$code, reason='$reason'")
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                isOpen = false
                 appendLog("[CLOSED] code=$code, reason='$reason'")
                 trySend(ConnectionState.Disconnected)
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                isOpen = false
                 val respInfo = if (response != null) " (HTTP ${response.code})" else ""
                 val errorMsg = "${t.javaClass.simpleName}: ${t.message ?: "Control connection failure"}$respInfo"
                 appendLog("[FAILURE] $errorMsg")
@@ -115,6 +125,7 @@ class ControlWebSocketClient {
                 webSocket?.close(1000, "Control client closed")
             } catch (_: Exception) {}
             webSocket = null
+        isOpen = false
         }
     }
 
@@ -129,10 +140,11 @@ class ControlWebSocketClient {
             webSocket?.close(1000, "Disconnected by user")
         } catch (_: Exception) {}
         webSocket = null
+        isOpen = false
         appendLog("[CLOSED] Disconnected")
     }
 
     fun isConnected(): Boolean {
-        return webSocket != null
+        return isOpen
     }
 }

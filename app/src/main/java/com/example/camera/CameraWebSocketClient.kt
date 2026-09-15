@@ -36,6 +36,7 @@ class CameraWebSocketClient {
         .build()
 
     private var webSocket: WebSocket? = null
+    private var isOpen: Boolean = false
 
     private val _connectionLogs = MutableStateFlow<List<String>>(emptyList())
     val connectionLogs: StateFlow<List<String>> = _connectionLogs.asStateFlow()
@@ -54,11 +55,12 @@ class CameraWebSocketClient {
         _connectionLogs.value = current
     }
 
-    fun connect(cameraUrl: String): Flow<ConnectionState> = callbackFlow {
+    fun connect(cameraUrl: String, helloJson: String? = null): Flow<ConnectionState> = callbackFlow {
         try {
             webSocket?.close(1000, "Reconnecting camera")
         } catch (_: Exception) {}
         webSocket = null
+        isOpen = false
 
         val request = try {
             Request.Builder().url(cameraUrl).build()
@@ -76,20 +78,28 @@ class CameraWebSocketClient {
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                appendLog("[OPEN] Camera stream connected to $cameraUrl (HTTP ${response.code} ${response.message})")
+                isOpen = true
+                // OkHttp Lifecycle: OPEN
+                appendLog("[OPEN] Connected to $cameraUrl (HTTP ${response.code} ${response.message})")
+                if (helloJson != null) {
+                    webSocket.send(helloJson)
+                }
                 trySend(ConnectionState.Connected)
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                isOpen = false
                 appendLog("[CLOSING] code=$code, reason='$reason'")
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                isOpen = false
                 appendLog("[CLOSED] code=$code, reason='$reason'")
                 trySend(ConnectionState.Disconnected)
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                isOpen = false
                 val respInfo = if (response != null) " (HTTP ${response.code})" else ""
                 val errorMsg = "${t.javaClass.simpleName}: ${t.message ?: "Camera connection failure"}$respInfo"
                 appendLog("[FAILURE] $errorMsg")
@@ -103,6 +113,7 @@ class CameraWebSocketClient {
                 webSocket?.close(1000, "Camera client closed")
             } catch (_: Exception) {}
             webSocket = null
+        isOpen = false
         }
     }
 
@@ -111,6 +122,13 @@ class CameraWebSocketClient {
      */
     fun sendBinaryFrame(metadata: CameraFrameMetadata, jpegBytes: ByteArray): Boolean {
         val ws = webSocket ?: return false
+        
+        // Backpressure check
+        if (ws.queueSize() > 2_000_000 && metadata.messageType == "CAMERA_PREVIEW_FRAME") { // e.g. 2MB
+            // queue is too large, drop this preview frame
+            return false
+        }
+        
         return try {
             val jsonString = Json.encodeToString(metadata)
             val jsonBytes = jsonString.toByteArray(Charsets.UTF_8)
@@ -136,10 +154,11 @@ class CameraWebSocketClient {
             webSocket?.close(1000, "Disconnected by user")
         } catch (_: Exception) {}
         webSocket = null
+        isOpen = false
         appendLog("[CLOSED] Disconnected")
     }
 
     fun isConnected(): Boolean {
-        return webSocket != null
+        return isOpen
     }
 }
