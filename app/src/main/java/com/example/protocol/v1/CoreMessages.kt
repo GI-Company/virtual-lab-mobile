@@ -30,7 +30,7 @@ data class InstrumentDescriptorMessage(
     val model: String,
     val software_version: String,
     val protocol_profiles: List<String> = listOf("CORE_V1", "CAMERA_V1"),
-    val capabilities: JsonElement? = null
+    val capabilities: List<String>
 ) : BaseMessage()
 
 @Serializable

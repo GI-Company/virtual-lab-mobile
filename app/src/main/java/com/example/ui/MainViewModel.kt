@@ -370,7 +370,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             device_id = deviceId,
             manufacturer = android.os.Build.MANUFACTURER,
             model = android.os.Build.MODEL,
-            software_version = "1.0"
+            software_version = "1.0",
+            capabilities = listOf("CAMERA", "SENSORS")
         ))
         controlWsJob = controlWebSocketClient.connect(controlUrl, controlHello).onEach { state ->
             if (state is ConnectionState.Connected) {

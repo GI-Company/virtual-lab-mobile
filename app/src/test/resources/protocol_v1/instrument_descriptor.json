@@ -9,5 +9,9 @@
   "protocol_profiles": [
     "CORE_V1",
     "CAMERA_V1"
+  ],
+  "capabilities": [
+    "CAMERA",
+    "SENSORS"
   ]
 }

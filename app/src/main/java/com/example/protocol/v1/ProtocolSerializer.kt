@@ -42,7 +42,8 @@ object ProtocolSerializer {
             ?: throw IllegalArgumentException("Missing message_type")
             
         val schemaVersion = jsonElement.jsonObject["schema_version"]?.jsonPrimitive?.content
-        if (schemaVersion != null && schemaVersion != ProtocolConstants.SCHEMA_VERSION) {
+            ?: throw IllegalArgumentException("Missing schema_version")
+        if (schemaVersion != ProtocolConstants.SCHEMA_VERSION) {
             throw IllegalArgumentException("Unsupported schema_version: $schemaVersion")
         }
 

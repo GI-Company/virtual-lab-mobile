@@ -505,12 +505,23 @@ class CameraAcquisitionManager(
         }
         
         try {
+            var failedParams = mapOf<String, String>()
             val captureBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                 addTarget(stillReader.surface)
-                // Need to apply control parameters manually since we rewrote applyControlParametersToBuilder
-                val dummyFailures = applyControlParametersToBuilder(this, parameters ?: currentControlParams)
+                failedParams = applyControlParametersToBuilder(this, parameters ?: currentControlParams)
                 set(CaptureRequest.JPEG_QUALITY, 95.toByte())
                 setTag(captureId)
+            }
+            
+            if (failedParams.isNotEmpty()) {
+                sendResult(ProtocolSerializer.serialize(ScientificCaptureResultMessage(
+                    request_id = captureId, 
+                    device_id = activeDeviceId, 
+                    status = "FAILED", 
+                    error_message = "PARAMETERS_REJECTED"
+                )))
+                captureState[captureId] = "FAILED"
+                return
             }
             
             kotlinx.coroutines.suspendCancellableCoroutine<Unit> { continuation ->
