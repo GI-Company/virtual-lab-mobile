@@ -1,14 +1,17 @@
 package com.example.camera
 
+import com.example.protocol.v1.BaseMessage
+import com.example.protocol.v1.ProtocolSerializer
 import android.util.Log
 import com.example.transport.ConnectionState
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
+
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
+
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.serialization.encodeToString
@@ -36,13 +39,14 @@ class ControlWebSocketClient {
         .build()
 
     private var webSocket: WebSocket? = null
+    private var currentConnectionId: String? = null
     private var isOpen: Boolean = false
     
     private val _connectionLogs = MutableStateFlow<List<String>>(emptyList())
     val connectionLogs: StateFlow<List<String>> = _connectionLogs.asStateFlow()
 
-    private val _incomingMessages = MutableSharedFlow<CameraControlMessage>(extraBufferCapacity = 16)
-    val incomingMessages: SharedFlow<CameraControlMessage> = _incomingMessages.asSharedFlow()
+    private val _incomingMessages = Channel<BaseMessage>(Channel.UNLIMITED)
+    val incomingMessages: Flow<BaseMessage> = _incomingMessages.receiveAsFlow()
 
     private val timeFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
 
@@ -63,6 +67,8 @@ class ControlWebSocketClient {
             webSocket?.close(1000, "Reconnecting")
         } catch (_: Exception) {}
         webSocket = null
+        val connectionId = java.util.UUID.randomUUID().toString()
+        currentConnectionId = connectionId
         isOpen = false
 
         val request = try {
@@ -81,6 +87,7 @@ class ControlWebSocketClient {
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                if (connectionId != currentConnectionId) return
                 isOpen = true
                 // OkHttp Lifecycle: OPEN
                 appendLog("[OPEN] Connected to $controlUrl (HTTP ${response.code} ${response.message})")
@@ -91,26 +98,30 @@ class ControlWebSocketClient {
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                if (connectionId != currentConnectionId) return
                 try {
-                    val message = json.decodeFromString<CameraControlMessage>(text)
-                    _incomingMessages.tryEmit(message)
+                    val message = ProtocolSerializer.deserialize<BaseMessage>(text)
+                    _incomingMessages.trySend(message)
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to parse control message: $text", e)
                 }
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                if (connectionId != currentConnectionId) return
                 isOpen = false
                 appendLog("[CLOSING] code=$code, reason='$reason'")
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                if (connectionId != currentConnectionId) return
                 isOpen = false
                 appendLog("[CLOSED] code=$code, reason='$reason'")
                 trySend(ConnectionState.Disconnected)
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                if (connectionId != currentConnectionId) return
                 isOpen = false
                 val respInfo = if (response != null) " (HTTP ${response.code})" else ""
                 val errorMsg = "${t.javaClass.simpleName}: ${t.message ?: "Control connection failure"}$respInfo"
@@ -121,11 +132,14 @@ class ControlWebSocketClient {
         })
 
         awaitClose {
-            try {
-                webSocket?.close(1000, "Control client closed")
-            } catch (_: Exception) {}
-            webSocket = null
-        isOpen = false
+            if (connectionId == currentConnectionId) {
+                try {
+                    webSocket?.close(1000, "Control client closed")
+                } catch (_: Exception) {}
+                webSocket = null
+                currentConnectionId = null
+                isOpen = false
+            }
         }
     }
 
@@ -140,6 +154,8 @@ class ControlWebSocketClient {
             webSocket?.close(1000, "Disconnected by user")
         } catch (_: Exception) {}
         webSocket = null
+        val connectionId = java.util.UUID.randomUUID().toString()
+        currentConnectionId = connectionId
         isOpen = false
         appendLog("[CLOSED] Disconnected")
     }

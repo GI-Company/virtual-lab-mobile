@@ -1,0 +1,8 @@
+{
+  "message_type": "SCIENTIFIC_FRAME_ACK",
+  "schema_version": "1",
+  "request_id": "req-2",
+  "device_id": "device-123",
+  "status": "COMMITTED",
+  "artifact_sha256": "abc123hash"
+}

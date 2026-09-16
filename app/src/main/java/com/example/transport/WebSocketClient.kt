@@ -36,6 +36,7 @@ class WebSocketClient {
         .build()
 
     private var webSocket: WebSocket? = null
+    private var currentConnectionId: String? = null
 
     private val _connectionLogs = MutableStateFlow<List<String>>(emptyList())
     val connectionLogs: StateFlow<List<String>> = _connectionLogs.asStateFlow()
@@ -59,6 +60,8 @@ class WebSocketClient {
             webSocket?.close(1000, "Reconnecting")
         } catch (_: Exception) {}
         webSocket = null
+        val connectionId = java.util.UUID.randomUUID().toString()
+        currentConnectionId = connectionId
 
         val request = try {
             Request.Builder().url(url).build()
@@ -78,6 +81,7 @@ class WebSocketClient {
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                if (connectionId != currentConnectionId) return
                 // OkHttp Lifecycle: OPEN
                 appendLog("[OPEN] Connected to $url (HTTP ${response.code} ${response.message})")
                 if (helloJson != null) {
@@ -87,21 +91,25 @@ class WebSocketClient {
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                if (connectionId != currentConnectionId) return
                 // Incoming application data
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                if (connectionId != currentConnectionId) return
                 // OkHttp Lifecycle: CLOSING
                 appendLog("[CLOSING] code=$code, reason='$reason'")
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                if (connectionId != currentConnectionId) return
                 // OkHttp Lifecycle: CLOSED
                 appendLog("[CLOSED] code=$code, reason='$reason'")
                 trySend(ConnectionState.Disconnected)
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                if (connectionId != currentConnectionId) return
                 // OkHttp Lifecycle: FAILURE
                 val respInfo = if (response != null) " (HTTP ${response.code})" else ""
                 val errorMsg = "${t.javaClass.simpleName}: ${t.message ?: "Connection failure"}$respInfo"
@@ -111,11 +119,16 @@ class WebSocketClient {
             }
         })
 
+        val capturedSocket = webSocket
         awaitClose {
-            try {
-                webSocket?.close(1000, "Connection closed by client")
-            } catch (_: Exception) {}
-            webSocket = null
+            if (webSocket == capturedSocket) {
+                try {
+                    webSocket?.close(1000, "Connection closed by client")
+                } catch (_: Exception) {}
+                webSocket = null
+        val connectionId = java.util.UUID.randomUUID().toString()
+        currentConnectionId = connectionId
+            }
         }
     }
 
@@ -129,6 +142,8 @@ class WebSocketClient {
             webSocket?.close(1000, "Disconnected by user")
         } catch (_: Exception) {}
         webSocket = null
+        val connectionId = java.util.UUID.randomUUID().toString()
+        currentConnectionId = connectionId
         appendLog("[CLOSED] Disconnected")
     }
 

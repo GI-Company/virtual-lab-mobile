@@ -1,30 +1,67 @@
-import sys
+import re
 
-with open('./app/src/main/java/com/example/camera/CameraAcquisitionManager.kt', 'r') as f:
+with open('app/src/main/java/com/example/acquisition/SensorAcquisitionManager.kt', 'r') as f:
     content = f.read()
-
-# 1. Fix the `""`
-content = content.replace("private var currentControlParams = ControlParameters()\"\"", "private var currentControlParams = ControlParameters()")
-
-# 2. Fix the encodeToString
-# Kotlin's kotlinx.serialization.encodeToString is an inline reified extension. 
-# But maybe we need to import it properly.
-import_str = "import kotlinx.serialization.encodeToString"
-if import_str not in content:
-    content = content.replace("import kotlinx.serialization.json.Json", "import kotlinx.serialization.encodeToString\nimport kotlinx.serialization.json.Json")
-
-with open('./app/src/main/java/com/example/camera/CameraAcquisitionManager.kt', 'w') as f:
+content = content.replace("import com.example.session.MeasurementPacket\n", "")
+with open('app/src/main/java/com/example/acquisition/SensorAcquisitionManager.kt', 'w') as f:
     f.write(content)
 
-with open('./app/src/main/java/com/example/ui/MainViewModel.kt', 'r') as f:
-    mv_content = f.read()
+with open('app/src/main/java/com/example/camera/CameraAcquisitionManager.kt', 'r') as f:
+    content = f.read()
 
-if "import kotlinx.coroutines.launch" not in mv_content:
-    mv_content = mv_content.replace("import kotlinx.coroutines.flow.launchIn", "import kotlinx.coroutines.flow.launchIn\nimport kotlinx.coroutines.launch")
+# Fix receiveAsFlow import
+if "import kotlinx.coroutines.flow.receiveAsFlow" not in content:
+    content = content.replace("import kotlinx.coroutines.flow.asSharedFlow\n", "import kotlinx.coroutines.flow.asSharedFlow\nimport kotlinx.coroutines.flow.receiveAsFlow\n")
 
-mv_content = mv_content.replace("cameraAcquisition.processControlCommand(msg) { responseJson ->", "cameraAcquisition.processControlCommand(msg) { responseJson: String ->")
+# Fix timestampNs in onPreviewImageAvailable
+content = content.replace("device_timestamp_ns = timestampNs", "device_timestamp_ns = timestamp")
 
-with open('./app/src/main/java/com/example/ui/MainViewModel.kt', 'w') as f:
-    f.write(mv_content)
+# Fix mangled onStillImageAvailable
+content = content.replace("onStillImageAvailablerivate fun onStillImageAvailable", "private fun onStillImageAvailable")
 
-print("Errors fixed")
+# Fix frame_sequence in CameraScientificFrameMessage
+content = content.replace("sequence = frameSequence++", "frame_sequence = frameSequence++")
+
+# Fix CameraPreviewFrameMessage initialization
+content = content.replace(
+"""                scientific_state = "MEASURED",
+                acquisition_type = "CAMERA_FRAME",
+                representation = "ISP_PROCESSED",
+                request_id = null,
+                payload_size_bytes = bytes.size,
+                payload_sha256 = null""",
+"""                scientific_state = "MEASURED",
+                acquisition_type = "CAMERA_FRAME",
+                representation = "ISP_PROCESSED",
+                payload_size_bytes = bytes.size
+"""
+)
+
+# Fix ControlParameters references. It has snake_case in protocol/v1/CameraMessages.kt
+# We need to change afMode -> af_mode, aeMode -> ae_mode, etc.
+replacements = {
+    "afMode": "af_mode",
+    "focusDistanceDiopters": "focus_distance_diopters",
+    "aeMode": "ae_mode",
+    "exposureTimeNs": "exposure_time_ns",
+    "frameDurationNs": "frame_duration_ns",
+    "aeCompensation": "ae_compensation",
+    "awbMode": "awb_mode",
+    "awbLock": "awb_lock",
+    "fpsRange": "fps_range",
+    "zoomRatio": "zoom_ratio",
+    "cropRegion": "crop_region",
+    "opticalStabilization": "optical_stabilization",
+    "videoStabilization": "video_stabilization"
+}
+
+for k, v in replacements.items():
+    content = content.replace(f"params.{k}", f"params.{v}")
+    content = content.replace(f"currentControlParams.{k}", f"currentControlParams.{v}")
+    content = content.replace(f"requested.{v} ?: currentControlParams.{v}", f"requested.{v} ?: currentControlParams.{v}")
+    content = content.replace(f"{k} = requested.{v} ?: currentControlParams.{v}", f"{v} = requested.{v} ?: currentControlParams.{v}")
+    content = content.replace(f"{k} = newRes", f"resolution = newRes") # wait, resolution is already correct.
+
+with open('app/src/main/java/com/example/camera/CameraAcquisitionManager.kt', 'w') as f:
+    f.write(content)
+

@@ -1,0 +1,27 @@
+{
+  "message_type": "CAMERA_SCIENTIFIC_FRAME",
+  "schema_version": "1",
+  "device_id": "device-123",
+  "stream_id": "stream-456",
+  "camera_stream_key": {
+    "camera_id": "0"
+  },
+  "frame_sequence": 2,
+  "device_timestamp_ns": 3000000,
+  "device_timebase": "MONOTONIC",
+  "width": 4000,
+  "height": 3000,
+  "encoding": "JPEG",
+  "orientation": 0,
+  "lens_facing": "BACK",
+  "focal_length_mm": 4.5,
+  "exposure_time_ns": 30000000,
+  "sensor_sensitivity_iso": 200,
+  "focus_distance_diopters": 5.0,
+  "scientific_state": "MEASURED",
+  "acquisition_type": "CAMERA_FRAME",
+  "representation": "ISP_PROCESSED",
+  "request_id": "req-2",
+  "payload_size_bytes": 5000000,
+  "payload_sha256": "def456hash"
+}

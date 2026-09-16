@@ -5,8 +5,8 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
-import com.example.session.MeasurementPacket
-import com.example.session.SensorMetadata
+import com.example.protocol.v1.MeasurementPacketMessage
+import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.BufferOverflow
@@ -126,11 +126,11 @@ class SensorAcquisitionManager(private val context: Context) {
     val liveReadings: StateFlow<Map<SensorTypeClass, LiveSensorReading>> = _liveReadings.asStateFlow()
 
     // Real packet stream for active capture
-    private val _packetStream = MutableSharedFlow<MeasurementPacket>(
+    private val _packetStream = MutableSharedFlow<MeasurementPacketMessage>(
         extraBufferCapacity = 256,
         onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
-    val packetStream: SharedFlow<MeasurementPacket> = _packetStream.asSharedFlow()
+    val packetStream: SharedFlow<MeasurementPacketMessage> = _packetStream.asSharedFlow()
 
     // Per-sensor sequence number
     private val sequenceNumbers = ConcurrentHashMap<SensorTypeClass, AtomicLong>()
@@ -144,7 +144,7 @@ class SensorAcquisitionManager(private val context: Context) {
     data class SensorStreamState(
         var isStreamingPackets: Boolean = false,
         var deviceId: String = "",
-        var sessionId: String = ""
+        var streamId: String = ""
     )
 
     private val streamStates = ConcurrentHashMap<SensorTypeClass, SensorStreamState>()
@@ -215,10 +215,11 @@ class SensorAcquisitionManager(private val context: Context) {
         for (sensorClass in selectedSensors) {
             if (isSensorAvailable(sensorClass)) {
                 sequenceNumbers.putIfAbsent(sensorClass, AtomicLong(0L))
+                sequenceNumbers[sensorClass] = java.util.concurrent.atomic.AtomicLong(0L)
                 streamStates.getOrPut(sensorClass) { SensorStreamState() }.apply {
                     this.isStreamingPackets = true
                     this.deviceId = deviceId
-                    this.sessionId = sessionId
+                    this.streamId = java.util.UUID.randomUUID().toString()
                 }
                 registerListener(sensorClass)
             }
@@ -284,7 +285,7 @@ class SensorAcquisitionManager(private val context: Context) {
                         sensorClass = sensorClass,
                         event = event,
                         deviceId = state.deviceId,
-                        sessionId = state.sessionId,
+                        streamId = state.streamId,
                         sequence = seq
                     )
                     _packetStream.tryEmit(packet)
@@ -331,29 +332,16 @@ class SensorAcquisitionManager(private val context: Context) {
         sensorClass: SensorTypeClass,
         event: SensorEvent,
         deviceId: String,
-        sessionId: String,
+        streamId: String,
         sequence: Long
-    ): MeasurementPacket {
-        val nowUtc = dateFormat.format(Date())
-        val meta = discoveredSensors[sensorClass]
-        val sensorName = meta?.name ?: event.sensor.name
-        val sensorVendor = meta?.vendor ?: event.sensor.vendor
-
+    ): MeasurementPacketMessage {
         val (valuesMap, unitsMap) = when (sensorClass) {
             SensorTypeClass.MAGNETOMETER -> {
                 val bx = event.values[0].toDouble()
                 val by = event.values[1].toDouble()
                 val bz = event.values[2].toDouble()
                 Pair(
-                    mapOf(
-                        "bx" to bx,
-                        "by" to by,
-                        "bz" to bz,
-                        // Compatibility with existing VirtualLab gateway
-                        "x_ut" to bx,
-                        "y_ut" to by,
-                        "z_ut" to bz
-                    ),
+                    mapOf("bx" to bx, "by" to by, "bz" to bz),
                     mapOf("bx" to "uT", "by" to "uT", "bz" to "uT")
                 )
             }
@@ -376,10 +364,10 @@ class SensorAcquisitionManager(private val context: Context) {
                 )
             }
             SensorTypeClass.AMBIENT_LIGHT -> {
-                val lux = event.values[0].toDouble()
+                val illuminance = event.values[0].toDouble()
                 Pair(
-                    mapOf("lux" to lux),
-                    mapOf("lux" to "lx")
+                    mapOf("illuminance" to illuminance),
+                    mapOf("illuminance" to "lx")
                 )
             }
             SensorTypeClass.PRESSURE -> {
@@ -390,24 +378,20 @@ class SensorAcquisitionManager(private val context: Context) {
                 )
             }
         }
-
-        return MeasurementPacket(
-            schemaVersion = "1",
-            deviceId = deviceId,
-            sourceSessionId = sessionId,
-            sessionId = sessionId,
-            measurementType = sensorClass.measurementType,
-            sensorId = sensorClass.sensorId,
+        
+        // Android monotonic time
+        val deviceTimestampNs = event.timestamp
+        
+        return MeasurementPacketMessage(
+            device_id = deviceId,
+            stream_id = streamId,
+            source_session_id = null,
+            measurement_type = sensorClass.measurementType,
+            sensor_id = sensorClass.name,
             sequence = sequence,
-            deviceTimestampNs = event.timestamp,
-            timestampMonotonicNs = event.timestamp,
-            timestampUtc = nowUtc,
-            sensor = SensorMetadata(
-                name = sensorName,
-                vendor = sensorVendor,
-                androidType = event.sensor.type,
-                accuracy = event.accuracy
-            ),
+            device_timestamp_ns = deviceTimestampNs,
+            device_timebase = "MONOTONIC",
+            device_utc_ns = null,
             values = valuesMap,
             units = unitsMap,
             accuracy = event.accuracy

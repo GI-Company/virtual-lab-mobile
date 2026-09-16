@@ -1,0 +1,13 @@
+{
+  "message_type": "INSTRUMENT_DESCRIPTOR",
+  "schema_version": "1",
+  "device_id": "device-123",
+  "manufacturer": "Test",
+  "model": "Model",
+  "software_version": "1.0",
+  "instrument_type": "SENSOR_NODE",
+  "protocol_profiles": [
+    "CORE_V1",
+    "CAMERA_V1"
+  ]
+}

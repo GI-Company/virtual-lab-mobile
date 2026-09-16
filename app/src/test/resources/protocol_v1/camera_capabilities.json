@@ -1,0 +1,67 @@
+{
+  "message_type": "CAMERA_CAPABILITIES",
+  "schema_version": "1",
+  "device_id": "device-123",
+  "camera_stream_key": {
+    "camera_id": "0"
+  },
+  "manual_sensor_supported": true,
+  "manual_focus_supported": true,
+  "exposure_time_range_ns": [
+    1000,
+    100000000
+  ],
+  "iso_range": [
+    100,
+    3200
+  ],
+  "minimum_focus_distance_diopters": 10.0,
+  "af_modes": [
+    "OFF",
+    "AUTO"
+  ],
+  "ae_modes": [
+    "OFF",
+    "ON"
+  ],
+  "ae_compensation_range": [
+    -12,
+    12
+  ],
+  "ae_compensation_step": 0.16666,
+  "awb_modes": [
+    "OFF",
+    "AUTO"
+  ],
+  "awb_lock_supported": true,
+  "fps_ranges": [
+    [
+      15,
+      30
+    ],
+    [
+      30,
+      30
+    ]
+  ],
+  "resolutions": [
+    [
+      1920,
+      1080
+    ],
+    [
+      1280,
+      720
+    ]
+  ],
+  "zoom_ratio_range": [
+    1.0,
+    10.0
+  ],
+  "stabilization_modes": [
+    "OFF",
+    "OPTICAL_ON"
+  ],
+  "torch_supported": true,
+  "raw_capability": true
+}

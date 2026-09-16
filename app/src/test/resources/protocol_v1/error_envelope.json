@@ -1,0 +1,11 @@
+{
+  "message_type": "ERROR_ENVELOPE",
+  "schema_version": "1",
+  "device_id": "test_device",
+  "severity": "FATAL",
+  "error_code": "DEVICE_OFFLINE",
+  "message": "The requested device is offline",
+  "details": {
+    "reason": "CONNECTION_LOST"
+  }
+}

@@ -1,5 +1,7 @@
 package com.example.camera
 
+import com.example.protocol.v1.BaseMessage
+import com.example.protocol.v1.ProtocolSerializer
 import android.util.Log
 import com.example.transport.ConnectionState
 import kotlinx.coroutines.channels.awaitClose
@@ -36,6 +38,7 @@ class CameraWebSocketClient {
         .build()
 
     private var webSocket: WebSocket? = null
+    private var currentConnectionId: String? = null
     private var isOpen: Boolean = false
 
     private val _connectionLogs = MutableStateFlow<List<String>>(emptyList())
@@ -60,6 +63,8 @@ class CameraWebSocketClient {
             webSocket?.close(1000, "Reconnecting camera")
         } catch (_: Exception) {}
         webSocket = null
+        val connectionId = java.util.UUID.randomUUID().toString()
+        currentConnectionId = connectionId
         isOpen = false
 
         val request = try {
@@ -78,6 +83,7 @@ class CameraWebSocketClient {
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                if (connectionId != currentConnectionId) return
                 isOpen = true
                 // OkHttp Lifecycle: OPEN
                 appendLog("[OPEN] Connected to $cameraUrl (HTTP ${response.code} ${response.message})")
@@ -88,17 +94,20 @@ class CameraWebSocketClient {
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                if (connectionId != currentConnectionId) return
                 isOpen = false
                 appendLog("[CLOSING] code=$code, reason='$reason'")
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                if (connectionId != currentConnectionId) return
                 isOpen = false
                 appendLog("[CLOSED] code=$code, reason='$reason'")
                 trySend(ConnectionState.Disconnected)
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                if (connectionId != currentConnectionId) return
                 isOpen = false
                 val respInfo = if (response != null) " (HTTP ${response.code})" else ""
                 val errorMsg = "${t.javaClass.simpleName}: ${t.message ?: "Camera connection failure"}$respInfo"
@@ -109,28 +118,31 @@ class CameraWebSocketClient {
         })
 
         awaitClose {
-            try {
-                webSocket?.close(1000, "Camera client closed")
-            } catch (_: Exception) {}
-            webSocket = null
-        isOpen = false
+            if (connectionId == currentConnectionId) {
+                try {
+                    webSocket?.close(1000, "Camera client closed")
+                } catch (_: Exception) {}
+                webSocket = null
+                currentConnectionId = null
+                isOpen = false
+            }
         }
     }
 
     /**
      * Sends binary camera frame composed of 4-byte big-endian JSON length + UTF-8 JSON metadata + raw JPEG bytes.
      */
-    fun sendBinaryFrame(metadata: CameraFrameMetadata, jpegBytes: ByteArray): Boolean {
+    fun sendBinaryFrame(metadata: BaseMessage, jpegBytes: ByteArray): Boolean {
         val ws = webSocket ?: return false
         
         // Backpressure check
-        if (ws.queueSize() > 2_000_000 && metadata.messageType == "CAMERA_PREVIEW_FRAME") { // e.g. 2MB
+        if (ws.queueSize() > 2_000_000 && metadata.message_type == "CAMERA_PREVIEW_FRAME") { // e.g. 2MB
             // queue is too large, drop this preview frame
             return false
         }
         
         return try {
-            val jsonString = Json.encodeToString(metadata)
+            val jsonString = ProtocolSerializer.serialize(metadata)
             val jsonBytes = jsonString.toByteArray(Charsets.UTF_8)
             val totalSize = 4 + jsonBytes.size + jpegBytes.size
 
@@ -154,6 +166,8 @@ class CameraWebSocketClient {
             webSocket?.close(1000, "Disconnected by user")
         } catch (_: Exception) {}
         webSocket = null
+        val connectionId = java.util.UUID.randomUUID().toString()
+        currentConnectionId = connectionId
         isOpen = false
         appendLog("[CLOSED] Disconnected")
     }

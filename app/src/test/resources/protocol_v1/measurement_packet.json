@@ -1,0 +1,23 @@
+{
+  "message_type": "MEASUREMENT_PACKET",
+  "schema_version": "1",
+  "device_id": "device-123",
+  "stream_id": "stream-456",
+  "source_session_id": "session-1",
+  "measurement_type": "ACCELERATION",
+  "sensor_id": "sensor-1",
+  "sequence": 100,
+  "device_timestamp_ns": 1000000,
+  "device_timebase": "MONOTONIC",
+  "values": {
+    "ax": 0.0,
+    "ay": 9.8,
+    "az": 0.0
+  },
+  "units": {
+    "ax": "m/s^2",
+    "ay": "m/s^2",
+    "az": "m/s^2"
+  },
+  "accuracy": 3
+}
